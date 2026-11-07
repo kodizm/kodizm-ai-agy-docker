@@ -2,7 +2,7 @@
 
 The Docker image of the Kodizm agy-bridge: a small Go service that serves the Anthropic Messages API (`/v1/messages`, `/v1/messages/count_tokens`, `/v1/models`) in front of Google's Antigravity CLI (`agy acp`). It lets a client that speaks Messages use the models the CLI offers (Gemini, plus the third party models it lists) under the Google accounts it is handed.
 
-The image carries the bridge and a pinned `agy` (URL and sha512 in the `Dockerfile`, self-updater off). It is published to `ghcr.io/anilcancakir/kodizm-ai-agy-docker` (`latest` and `sha-<commit>`) by the `image` workflow on every push to `main`, after `go vet` and `go test -race`.
+The image carries the bridge and a pinned `agy` (URL and sha512 in the `Dockerfile`, self-updater off). It is published to `ghcr.io/kodizm/kodizm-ai-agy-docker` (`latest` and `sha-<commit>`) by the `image` workflow on every push to `main`, after `go vet` and `go test -race`.
 
 ## How it is used
 
