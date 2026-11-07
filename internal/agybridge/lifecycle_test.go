@@ -581,6 +581,10 @@ func TestRequestLogNamesTheBuiltInMode(t *testing.T) {
 }
 
 func TestCleanupFailuresAreCountedWithoutPaths(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions, so the removal cannot be made to fail")
+	}
+
 	logs := captureLog(t)
 	b := newBridge(t, nil)
 	first := userText("SCRIPT:tool")

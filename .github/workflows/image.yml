@@ -22,15 +22,17 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     container: golang:1.25.6-bookworm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
+      # -timeout is shorter than the job limit so a hung test fails with a
+      # goroutine dump naming it, instead of the job being cancelled blind.
       - name: Vet and test
         run: |
           go vet ./...
-          go test -race ./...
+          go test -race -timeout 8m ./...
 
   image:
     name: Build and push
