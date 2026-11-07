@@ -1,0 +1,42 @@
+name: agy version
+
+# agy is pinned by URL and sha512 in the Dockerfile and its self-updater is off,
+# so the pin is whatever was last smoke-tested. This goes red weekly while the pin
+# is behind the release manifest: the reminder to bump all three ARGs, smoke a
+# real call through a test account, rebuild and roll out.
+
+on:
+  schedule:
+    - cron: '41 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Compare the pin with the release manifest
+        run: |
+          pinned="$(sed -n 's/^ARG AGY_VERSION=//p' Dockerfile)"
+          manifest="$(curl -fsSL https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json)"
+          latest="$(printf '%s' "$manifest" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+
+          if [ -z "$latest" ]; then
+            echo "Could not read the version from the release manifest." >&2
+            exit 1
+          fi
+
+          if [ "$pinned" = "$latest" ]; then
+            echo "Pinned $pinned is the latest release."
+            exit 0
+          fi
+
+          echo "Pinned agy $pinned is behind the latest release $latest." >&2
+          echo "Bump AGY_VERSION, AGY_URL and AGY_SHA512 in the Dockerfile, smoke a real call, rebuild, roll out." >&2
+          exit 1
