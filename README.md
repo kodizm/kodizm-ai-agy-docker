@@ -16,7 +16,7 @@ Kodizm provisions the container on its Docker host, then **connects to the bridg
 | `GET /v1/admin/usage` | The latest quota reading per account |
 | `POST /v1/admin/login`, `POST /v1/admin/login/{id}/code`, `DELETE /v1/admin/login/{id}` | A Google sign-in through `agy acp --login` |
 
-Every agy process runs in its own throwaway `HOME` with one account's access-only login. Which account serves a request is chosen from the conversation prefix (prompt cache reuse), then remaining quota, then least recent use; quota, rate and capacity failures cool an account per model group.
+Every agy process runs in its own throwaway `HOME` with one account's access-only login. Which account serves a request is chosen from the conversation prefix (prompt cache reuse), then remaining quota, then least recent use; quota, rate and capacity failures cool an account per model group. Every `/v1/messages` response an agy session produced carries `X-Kodizm-Account: <account id>` (the id Kodizm pushed, never the email or a token); a response with no session, such as `503 no agy account available`, does not.
 
 Without pushed accounts, requests get `503 no agy account available`. For local development, `AGY_BRIDGE_TOKEN_FILE` points at one agy token file instead (the admin routes then answer `409`).
 

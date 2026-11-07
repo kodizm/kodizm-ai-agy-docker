@@ -72,6 +72,17 @@ func writeError(w http.ResponseWriter, failure *apiError) {
 	writeJSON(w, failure.status, envelope(failure))
 }
 
+// accountHeader names the account a response's agy session ran under, by id
+// (never email or token), so the gateway can tell which credential answered.
+const accountHeader = "X-Kodizm-Account"
+
+// markAccount sets the header for the session that will write the response.
+// It only fills the header map: a retry on another account replaces the value
+// while the client has seen nothing, and the head carries whichever is last.
+func markAccount(w http.ResponseWriter, s *session) {
+	w.Header().Set(accountHeader, s.lease.Account.ID)
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	body, err := json.Marshal(v)
 	if err != nil {

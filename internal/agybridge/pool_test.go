@@ -824,6 +824,73 @@ func TestQuotaFailureMovesToAnotherAccount(t *testing.T) {
 	}
 }
 
+func TestResponsesNameTheAccountThatRan(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "buffered", true: "stream"}[stream], func(t *testing.T) {
+			body := map[string]any{"model": "gemini-3.8-flash", "stream": stream, "messages": userText("SCRIPT:account")}
+
+			b := newBridgeWith(t, nil, newTestSource(testAccount("a")))
+
+			resp := b.post(t, body)
+			expectStatus(t, resp, http.StatusOK)
+
+			if got := resp.Header.Get(accountHeader); got != "a" {
+				t.Fatalf("%s = %q, want a", accountHeader, got)
+			}
+
+			b.waitIdle(t)
+		})
+	}
+}
+
+func TestRetriedTurnNamesTheAccountThatAnswered(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "buffered", true: "stream"}[stream], func(t *testing.T) {
+			// a fails on quota before any output, so b answers.
+			fakeAccounts(t, `{"tok-a":"quota","tok-b":"ok"}`)
+			b := newBridgeWith(t, nil, newTestSource(testAccount("a"), testAccount("b")))
+
+			resp := b.post(t, map[string]any{
+				"model":    "gemini-3.8-flash",
+				"stream":   stream,
+				"messages": userText("SCRIPT:account"),
+			})
+			expectStatus(t, resp, http.StatusOK)
+
+			if got := resp.Header.Get(accountHeader); got != "b" {
+				t.Fatalf("%s = %q, want b", accountHeader, got)
+			}
+
+			b.waitIdle(t)
+
+			if n := b.spawnedBy(t, "tok-a"); n != 1 {
+				t.Fatalf("a ran %d times, want the failed attempt", n)
+			}
+		})
+	}
+}
+
+func TestNoAccountLeasedNoAccountHeader(t *testing.T) {
+	fakeAccounts(t, `{"tok-a":"verification"}`)
+	b := newBridge(t, nil)
+
+	// 1. The first request ran on a, which failed.
+	resp := b.post(t, map[string]any{"model": "x", "messages": userText("SCRIPT:plain")})
+	expectStatus(t, resp, http.StatusBadGateway)
+
+	if got := resp.Header.Get(accountHeader); got != "a" {
+		t.Fatalf("%s = %q, want the account that failed", accountHeader, got)
+	}
+
+	// 2. Then none is left: no session ran, so nothing names an account.
+	resp = b.post(t, map[string]any{"model": "x", "messages": userText("SCRIPT:plain")})
+	expectStatus(t, resp, http.StatusServiceUnavailable)
+
+	if got := resp.Header.Values(accountHeader); len(got) != 0 {
+		t.Fatalf("%s = %q on a response without a session", accountHeader, got)
+	}
+}
+
 func TestDeadAccountsAreNeverRetried(t *testing.T) {
 	for _, kind := range []string{"auth", "verification"} {
 		t.Run(kind, func(t *testing.T) {

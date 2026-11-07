@@ -685,6 +685,7 @@ func (srv *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rl.useSession(s)
+	markAccount(w, s)
 	deniedBefore := s.denied.Load()
 
 	var out responder = &collector{w: w, id: rl.id, model: req.Model}
@@ -712,6 +713,7 @@ func (srv *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		rl.cleanupFailed += s.cleanupFailed.Load()
 		s, deniedBefore = next, 0
 		rl.useSession(s)
+		markAccount(w, s)
 
 		end, err = s.drive(r.Context(), out, early.C)
 	}
