@@ -23,7 +23,12 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    container: golang:1.25.6-bookworm
+    # --init gives the container a PID 1 that reaps orphans. Without it the
+    # processes the tests spawn stay zombies and the tests that wait for them to
+    # exit time out; the image itself runs under tini for the same reason.
+    container:
+      image: golang:1.25.6-bookworm
+      options: --init
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
