@@ -40,6 +40,9 @@ type apiError struct {
 	// retryAfter, when set, is the Retry-After the client is told instead of
 	// the fixed one.
 	retryAfter time.Duration
+	// reason names why the bridge itself refused a request, for the request
+	// log only; the client never sees it.
+	reason string
 }
 
 func (e *apiError) Error() string {
@@ -95,6 +98,10 @@ var (
 
 	// emailPattern also catches an address URL-encoded into a query string.
 	emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+-]+(?:@|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
+
+	// tokenPattern finds a run long enough to be an access token or a key, which
+	// agy's stderr must never carry into the bridge's log.
+	tokenPattern = regexp.MustCompile(`[A-Za-z0-9_.\-+=]{32,}`)
 )
 
 // classifyBanner recognises the text agy streams in place of an answer when
@@ -257,16 +264,53 @@ func agentEnv(base []string, home string) []string {
 	return append(env, "AGY_CLI_DISABLE_AUTO_UPDATE=true", "HOME="+home)
 }
 
+// stderrTailBytes bounds the tail of agy's stderr kept for the failure log.
+const stderrTailBytes = 2048
+
+// tailBuffer keeps the last stderrTailBytes bytes written to it: agy's stderr
+// is the only place a crash explains itself, and a chatty agy must not grow
+// the bridge's memory.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	p = p[max(0, n-stderrTailBytes):]
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.buf = append(t.buf, p...)
+	t.buf = t.buf[max(0, len(t.buf)-stderrTailBytes):]
+
+	return n, nil
+}
+
+// masked is the tail fit for the log: trimmed, without an email address and
+// without a token-like run.
+func (t *tailBuffer) masked() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	text := emailPattern.ReplaceAllString(string(t.buf), "<email>")
+
+	return strings.TrimSpace(tokenPattern.ReplaceAllString(text, "<redacted>"))
+}
+
 // startAgent spawns agy with home as its HOME; cancelling ctx kills it.
 // onChunk receives every agent_message_chunk text, onDenied the method of
 // every agent request answered cancelled and onToolCall every tool_call
-// update, all on the reader goroutine; none may block.
+// update, all on the reader goroutine; none may block. stderr receives agy's
+// stderr until the process is reaped.
 // extraArgs go between `acp` and `--disable-telemetry`.
 func startAgent(
 	ctx context.Context,
 	bin string,
 	extraArgs []string,
 	home string,
+	stderr io.Writer,
 	onChunk, onDenied func(string),
 	onToolCall func(),
 ) (*agent, error) {
@@ -276,6 +320,7 @@ func startAgent(
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = agentWaitDelay
 	cmd.Env = agentEnv(os.Environ(), home)
+	cmd.Stderr = stderr
 
 	a := &agent{
 		cmd:        cmd,

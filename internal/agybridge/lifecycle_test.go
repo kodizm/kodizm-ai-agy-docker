@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -212,19 +213,183 @@ func TestUnchangedOrShrunkToolSetResumes(t *testing.T) {
 	}
 }
 
-func TestParkedCapAnswers529BeforeAnyByte(t *testing.T) {
+// lateResult is the request a client sends when it finally answers a call.
+func lateResult(first []map[string]any, calls []toolUse, result string) []map[string]any {
+	return append(slices.Clone(first),
+		assistantCalls("Let me look.", calls),
+		toolResultMessage(map[string]string{calls[0].id: result}),
+	)
+}
+
+// Abandoned tool_use turns must not lock fresh requests out: at the cap the
+// oldest parked turn goes and the new request is served.
+func TestParkedCapEvictsTheOldestTurn(t *testing.T) {
+	b := newBridge(t, nil)
+
+	// 1. The cap fills with parked turns, the first the oldest.
+	firsts := make([][]map[string]any, b.srv.cfg.MaxParked)
+	held := make([][]toolUse, b.srv.cfg.MaxParked)
+
+	for i := range firsts {
+		firsts[i] = userText("SCRIPT:tool turn " + strconv.Itoa(i))
+		_, held[i], _, _ = b.turn(t, false, firsts[i])
+	}
+
+	// 2. A fresh request at the cap is answered, not refused.
+	for _, stream := range []bool{false, true} {
+		if text, _, stop, _ := b.turn(t, stream, userText("SCRIPT:plain")); text != "Hello, world" || stop != "end_turn" {
+			t.Fatalf("fresh turn at the cap answered %q, stop %q", text, stop)
+		}
+	}
+
+	if n := b.srv.reg.parked(); n != b.srv.cfg.MaxParked-1 {
+		t.Fatalf("%d turns parked after the eviction, want %d", n, b.srv.cfg.MaxParked-1)
+	}
+
+	// 3. The evicted turn's late result replays on a fresh session.
+	spawned := b.spawned(t)
+
+	if text, _, stop, _ := b.turn(t, false, lateResult(firsts[0], held[0], "SCRIPT:plain")); text != "Hello, world" ||
+		stop != "end_turn" {
+		t.Fatalf("late result of the evicted turn answered %q, stop %q", text, stop)
+	}
+
+	if n := b.spawned(t); n != spawned+1 {
+		t.Fatalf("agy started %d times for the replay, want 1", n-spawned)
+	}
+
+	// 4. The younger turns still resume.
+	if text, _, _, _ := b.turn(t, false, lateResult(firsts[1], held[1], "ok")); text != "Tool said: ok" {
+		t.Fatalf("a younger parked turn answered %q", text)
+	}
+
+	if n := b.spawned(t); n != spawned+1 {
+		t.Fatalf("the continuation started agy: %d spawns after the replay", n-spawned-1)
+	}
+}
+
+func TestEvictedTurnReplays(t *testing.T) {
+	logs := captureLog(t)
+	limits := map[string]string{"AGY_BRIDGE_MAX_CONCURRENT": "1", "AGY_BRIDGE_MAX_PARKED": "1"}
+	b := newBridge(t, limits, func(cfg *Config) {
+		cfg.SlotWait = 200 * time.Millisecond
+	})
+
+	// 1. The second turn evicts the first at the cap of one.
+	firstA, firstB := userText("SCRIPT:tool a"), userText("SCRIPT:tool b")
+	_, callsA, _, _ := b.turn(t, false, firstA)
+	_, callsB, _, _ := b.turn(t, false, firstB)
+
+	if n := b.srv.reg.parked(); n != 1 {
+		t.Fatalf("%d turns parked, want only the second", n)
+	}
+
+	// 2. The first one's late result replays, evicting the second in turn.
+	if text, _, stop, _ := b.turn(t, false, lateResult(firstA, callsA, "SCRIPT:plain")); text != "Hello, world" ||
+		stop != "end_turn" {
+		t.Fatalf("replay answered %q, stop %q", text, stop)
+	}
+
+	// 3. The second one replays too, and nothing holds a slot or a call.
+	if text, _, _, _ := b.turn(t, false, lateResult(firstB, callsB, "SCRIPT:plain")); text != "Hello, world" {
+		t.Fatalf("second replay answered %q", text)
+	}
+
+	b.waitIdle(t)
+
+	if n := b.spawned(t); n != 4 {
+		t.Fatalf("agy started %d times, want 4 (two turns, two replays)", n)
+	}
+
+	if held := len(b.srv.slots); held != 0 {
+		t.Fatalf("%d server slots leaked", held)
+	}
+
+	if line := logs.String(); strings.Count(line, "orphan_results=1 ") != 2 || strings.Contains(line, "continued=true ") {
+		t.Fatalf("want two replays and no continuation in the request lines:\n%s", line)
+	}
+}
+
+// A result and an eviction for the same parked turn arrive together: the turn
+// either resumes or is evicted and replayed, never both and never neither.
+func TestEvictionRacingResume(t *testing.T) {
 	b := newBridge(t, map[string]string{"AGY_BRIDGE_MAX_PARKED": "1"})
 
-	b.turn(t, false, userText("SCRIPT:tool"))
+	for i := range 8 {
+		spawned := b.spawned(t)
+		first := userText("SCRIPT:tool race " + strconv.Itoa(i))
+		_, calls, _, _ := b.turn(t, false, first)
 
-	for _, stream := range []bool{false, true} {
-		resp := b.post(t, map[string]any{"model": "x", "stream": stream, "messages": userText("SCRIPT:plain")})
-		expectOverloaded(t, resp)
-	}
+		resumed := b.postAsync(map[string]any{
+			"model":    "x",
+			"tools":    readFileTool,
+			"messages": lateResult(first, calls, "SCRIPT:plain"),
+		})
+		fresh := b.postAsync(map[string]any{"model": "x", "tools": readFileTool, "messages": userText("SCRIPT:plain")})
 
-	if n := b.spawned(t); n != 1 {
-		t.Fatalf("agy started %d times, want only the parked one", n)
+		late, evictor := <-resumed, <-fresh
+
+		if evictor.err != nil || evictor.status != http.StatusOK || evictor.text != "Hello, world" {
+			t.Fatalf("round %d: fresh request got %+v", i, evictor)
+		}
+
+		// One spawn for the turn itself and one for the fresh request; a
+		// replay is a third.
+		wantSpawns := map[string]int{"Tool said: SCRIPT:plain": 2, "Hello, world": 3}[late.text]
+		if late.err != nil || late.status != http.StatusOK || wantSpawns == 0 {
+			t.Fatalf("round %d: late result got %+v", i, late)
+		}
+
+		if n := b.spawned(t) - spawned; n != wantSpawns {
+			t.Fatalf("round %d: late result answered %q with %d spawns, want %d", i, late.text, n, wantSpawns)
+		}
+
+		b.waitIdle(t)
+
+		if parked, held := b.srv.reg.parked(), len(b.srv.slots); parked != 0 || held != 0 {
+			t.Fatalf("round %d: %d parked turns and %d slots left", i, parked, held)
+		}
 	}
+}
+
+type asyncReply struct {
+	status int
+	text   string
+	err    error
+}
+
+// postAsync sends a Messages request from another goroutine, so two can race.
+func (b *bridge) postAsync(body any) <-chan asyncReply {
+	reply := make(chan asyncReply, 1)
+
+	go func() {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			reply <- asyncReply{err: err}
+
+			return
+		}
+
+		resp, err := b.ts.Client().Post(b.ts.URL+"/v1/messages", "application/json", bytes.NewReader(raw))
+		if err != nil {
+			reply <- asyncReply{err: err}
+
+			return
+		}
+
+		defer resp.Body.Close()
+
+		var got messageResponse
+
+		out := asyncReply{status: resp.StatusCode, err: json.NewDecoder(resp.Body).Decode(&got)}
+		if len(got.Content) > 0 {
+			out.text = got.Content[0].Text
+		}
+
+		reply <- out
+	}()
+
+	return reply
 }
 
 func TestSlotWaitAnswers529BeforeAnyByte(t *testing.T) {
@@ -248,6 +413,37 @@ func TestSlotWaitAnswers529BeforeAnyByte(t *testing.T) {
 
 	if waited := time.Since(started); waited < 200*time.Millisecond || waited > 2*time.Second {
 		t.Fatalf("slot wait took %s", waited)
+	}
+}
+
+// A fresh request that cannot get a server slot must not cost a parked turn its
+// life: a parked turn holds no slot, so ending one frees nothing the request can
+// use, and a client retrying its 529 would empty the parked turns for nothing.
+func TestSlotWaitDoesNotEvictAParkedTurn(t *testing.T) {
+	b := newBridge(t, map[string]string{"AGY_BRIDGE_MAX_PARKED": "1"}, func(cfg *Config) {
+		cfg.SlotWait = 200 * time.Millisecond
+	})
+
+	first := userText("SCRIPT:tool parked")
+	_, held, _, _ := b.turn(t, false, first)
+
+	// Every server slot is busy: the fresh request waits and is refused.
+	for range cap(b.srv.slots) {
+		b.srv.slots <- struct{}{}
+	}
+
+	expectOverloaded(t, b.post(t, map[string]any{"model": "x", "messages": userText("SCRIPT:plain")}))
+
+	for range cap(b.srv.slots) {
+		<-b.srv.slots
+	}
+
+	if n := b.srv.reg.parked(); n != 1 {
+		t.Fatalf("%d turns parked after the refused request, want the one it must not evict", n)
+	}
+
+	if text, _, _, _ := b.turn(t, false, lateResult(first, held, "ok")); text != "Tool said: ok" {
+		t.Fatalf("the parked turn answered %q after the refusal", text)
 	}
 }
 
