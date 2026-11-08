@@ -42,8 +42,12 @@ func toolChoiceType(req *messagesRequest) string {
 		return "-"
 	}
 
-	return cmp.Or(choice.Type, "-")
+	// A client string, so it is cut before it reaches the log.
+	return cmp.Or(choice.Type[:min(len(choice.Type), toolChoiceLogBytes)], "-")
 }
+
+// toolChoiceLogBytes bounds the tool_choice type written to the request log.
+const toolChoiceLogBytes = 32
 
 // maxTokens is the request's max_tokens, 0 when it names none.
 func maxTokens(req *messagesRequest) int {

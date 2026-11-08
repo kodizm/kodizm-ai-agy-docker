@@ -388,18 +388,23 @@ func (s *session) resumeFromPark() bool {
 }
 
 // evictIfParked cancels the turn only while it is parked: a turn agy is working
-// on keeps its slot, and one a resume has just unparked is not touched.
-func (s *session) evictIfParked() bool {
+// on keeps its slot, and one a resume has just unparked is not touched. parked
+// tells whether the turn was parked, so the caller may wait for it to end;
+// cancelled is true only for the call that ended it, since an expired turn is
+// still flagged parked until it has torn down.
+func (s *session) evictIfParked() (parked, cancelled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if !s.parked {
-		return false
+		return false, false
 	}
+
+	cancelled = s.ctx.Err() == nil
 
 	s.cancel()
 
-	return true
+	return true, cancelled
 }
 
 // lacksAnyOf reports whether a tool is not among those agy listed for the session.

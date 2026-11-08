@@ -101,7 +101,7 @@ var (
 
 	// tokenPattern finds a run long enough to be an access token or a key, which
 	// agy's stderr must never carry into the bridge's log.
-	tokenPattern = regexp.MustCompile(`[A-Za-z0-9_.\-/+=]{40,}`)
+	tokenPattern = regexp.MustCompile(`[A-Za-z0-9_.\-+=]{32,}`)
 )
 
 // classifyBanner recognises the text agy streams in place of an answer when

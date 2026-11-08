@@ -416,6 +416,37 @@ func TestSlotWaitAnswers529BeforeAnyByte(t *testing.T) {
 	}
 }
 
+// A fresh request that cannot get a server slot must not cost a parked turn its
+// life: a parked turn holds no slot, so ending one frees nothing the request can
+// use, and a client retrying its 529 would empty the parked turns for nothing.
+func TestSlotWaitDoesNotEvictAParkedTurn(t *testing.T) {
+	b := newBridge(t, map[string]string{"AGY_BRIDGE_MAX_PARKED": "1"}, func(cfg *Config) {
+		cfg.SlotWait = 200 * time.Millisecond
+	})
+
+	first := userText("SCRIPT:tool parked")
+	_, held, _, _ := b.turn(t, false, first)
+
+	// Every server slot is busy: the fresh request waits and is refused.
+	for range cap(b.srv.slots) {
+		b.srv.slots <- struct{}{}
+	}
+
+	expectOverloaded(t, b.post(t, map[string]any{"model": "x", "messages": userText("SCRIPT:plain")}))
+
+	for range cap(b.srv.slots) {
+		<-b.srv.slots
+	}
+
+	if n := b.srv.reg.parked(); n != 1 {
+		t.Fatalf("%d turns parked after the refused request, want the one it must not evict", n)
+	}
+
+	if text, _, _, _ := b.turn(t, false, lateResult(first, held, "ok")); text != "Tool said: ok" {
+		t.Fatalf("the parked turn answered %q after the refusal", text)
+	}
+}
+
 func TestParkedTurnReleasesItsSlot(t *testing.T) {
 	b := newBridge(t, map[string]string{"AGY_BRIDGE_MAX_CONCURRENT": "1"}, func(cfg *Config) {
 		cfg.SlotWait = 200 * time.Millisecond

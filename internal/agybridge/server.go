@@ -938,11 +938,14 @@ func (srv *Server) evictAtParkedCap(ctx context.Context) error {
 			return nil
 		}
 
-		if !oldest.evictIfParked() {
+		parked, cancelled := oldest.evictIfParked()
+		if !parked {
 			continue
 		}
 
-		log.Printf("session %s: evicted at the parked cap", oldest.tag)
+		if cancelled {
+			log.Printf("session %s: evicted at the parked cap", oldest.tag)
+		}
 
 		if err := endTurns(ctx, []*session{oldest}); err != nil {
 			return err
@@ -955,17 +958,15 @@ func (srv *Server) evictAtParkedCap(ctx context.Context) error {
 // startSession admits a fresh turn: with an account other than exclude and with
 // a server slot, evicting the oldest parked turn when the parked cap is full,
 // or not at all. accountWait bounds the wait for an account slot; the server
-// slot waits what is left of the configured wait.
+// slot waits what is left of the configured wait. The eviction comes last: a
+// parked turn holds no slot, so ending one for a request that is then refused
+// for want of a slot would cost it its life for nothing.
 func (srv *Server) startSession(
 	ctx context.Context,
 	spec sessionSpec,
 	exclude string,
 	accountWait time.Duration,
 ) (*session, error) {
-	if err := srv.evictAtParkedCap(ctx); err != nil {
-		return nil, err
-	}
-
 	started := time.Now()
 
 	lease, err := srv.pool.acquire(ctx, spec.affinity, spec.groups, exclude, accountWait)
@@ -981,6 +982,13 @@ func (srv *Server) startSession(
 		s.cancel()
 
 		return nil, slotFailure(ctx, reasonSlotWait)
+	}
+
+	if err := srv.evictAtParkedCap(ctx); err != nil {
+		s.releaseSlot()
+		s.cancel()
+
+		return nil, err
 	}
 
 	srv.lifeMu.Lock()
