@@ -626,6 +626,13 @@ func (f *fakeAgy) prompt(id json.RawMessage, prompt string) {
 	if i := strings.LastIndex(prompt, "SCRIPT:"); i >= 0 {
 		if fields := strings.Fields(prompt[i+len("SCRIPT:"):]); len(fields) > 0 {
 			script = fields[0]
+
+			// "stderr <script>" leaves a line on stderr, then runs the script.
+			if script == "stderr" && len(fields) > 1 {
+				fmt.Fprintln(os.Stderr, "contact me at a@b.co")
+
+				script = fields[1]
+			}
 		}
 	}
 

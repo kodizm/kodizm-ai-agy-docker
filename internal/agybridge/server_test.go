@@ -1201,6 +1201,77 @@ func TestUpstreamFailuresMapToAnthropicErrors(t *testing.T) {
 	}
 }
 
+// A 529 the bridge itself sends names its cause in the request line, so a
+// refusal can be told from agy's own overload.
+func TestRefusalLogCarriesReason(t *testing.T) {
+	logs := captureLog(t)
+	b := newBridge(t, map[string]string{"AGY_BRIDGE_MAX_CONCURRENT": "1"}, func(cfg *Config) {
+		cfg.SlotWait = 200 * time.Millisecond
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	hanging := b.do(t, ctx, http.MethodPost, "/v1/messages", map[string]any{
+		"model":    "x",
+		"stream":   true,
+		"messages": userText("SCRIPT:hang"),
+	}, nil)
+	waitForEvent(t, bufio.NewReader(hanging.Body), "content_block_delta")
+
+	expectOverloaded(t, b.post(t, map[string]any{"model": "x", "messages": userText("SCRIPT:plain")}))
+
+	var line string
+
+	eventually(t, "the refusal's request line", func() bool {
+		line = logLine(logs, `outcome="529 overloaded_error"`)
+
+		return line != ""
+	})
+
+	if !strings.Contains(line, " reason=slot_wait ") {
+		t.Fatalf("want the slot wait named in the request line:\n%s", line)
+	}
+
+	for _, want := range []string{" body_bytes=", " system_bytes=", " tool_choice=", " max_tokens="} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("request line lacks %q:\n%s", want, line)
+		}
+	}
+}
+
+// agy's stderr is the only place a crash explains itself; its tail reaches the
+// log once the process is gone, without an email address.
+func TestFailureLogCarriesStderrTail(t *testing.T) {
+	logs := captureLog(t)
+	b := newBridge(t, nil)
+
+	resp := b.post(t, map[string]any{"model": "x", "messages": userText("SCRIPT:stderr fatal")})
+	expectStatus(t, resp, http.StatusBadGateway)
+
+	b.waitIdle(t)
+
+	line := logLine(logs, "stderr_tail=")
+	if line == "" {
+		t.Fatalf("no stderr tail logged:\n%s", logs.String())
+	}
+
+	if !strings.Contains(line, "<email>") || strings.Contains(line, "a@b.co") {
+		t.Fatalf("want the tail with the email masked:\n%s", line)
+	}
+}
+
+// logLine is the first captured log line holding substr, or "".
+func logLine(logs *syncBuffer, substr string) string {
+	for line := range strings.SplitSeq(logs.String(), "\n") {
+		if strings.Contains(line, substr) {
+			return line
+		}
+	}
+
+	return ""
+}
+
 // The gateway's first-byte timer would cut a stream whose first token is slow:
 // past firstByteAfter the head goes out early, pings follow, and the turn ends
 // as usual.

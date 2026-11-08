@@ -2,6 +2,7 @@ package agybridge
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,34 @@ type messagesRequest struct {
 	// effort, and must not make the whole request a 400.
 	OutputConfig json.RawMessage `json:"output_config"`
 	Thinking     json.RawMessage `json:"thinking"`
+	// ToolChoice and MaxTokens are read for the request log only, so they stay
+	// raw too.
+	ToolChoice json.RawMessage `json:"tool_choice"`
+	MaxTokens  json.RawMessage `json:"max_tokens"`
+}
+
+// toolChoiceType is the type of the request's tool_choice, "-" when it has none.
+func toolChoiceType(req *messagesRequest) string {
+	var choice struct {
+		Type string `json:"type"`
+	}
+
+	if json.Unmarshal(req.ToolChoice, &choice) != nil {
+		return "-"
+	}
+
+	return cmp.Or(choice.Type, "-")
+}
+
+// maxTokens is the request's max_tokens, 0 when it names none.
+func maxTokens(req *messagesRequest) int {
+	var n float64
+
+	if json.Unmarshal(req.MaxTokens, &n) != nil {
+		return 0
+	}
+
+	return int(n)
 }
 
 // agy's thinking levels; a model id agy takes is "<base>-<level>".

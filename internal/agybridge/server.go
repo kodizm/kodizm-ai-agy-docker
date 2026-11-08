@@ -90,7 +90,7 @@ type Config struct {
 	// last turn, so Google's prompt cache for it is reused.
 	AffinityTTL time.Duration
 	// MaxParked bounds turns parked on tool results; at the cap a new turn
-	// is refused.
+	// evicts the oldest parked one.
 	MaxParked int
 	// PendingTTL is how long a parked turn waits for its tool results.
 	PendingTTL time.Duration
@@ -595,7 +595,16 @@ type requestLog struct {
 	reported     agyUsage
 	agyToolCalls int64
 	outcome      string
-	started      time.Time
+	// reason is why the bridge itself refused the request, "-" for any other
+	// outcome.
+	reason string
+	// bodyBytes and systemBytes size the request, toolChoice and maxTokens echo
+	// two of its knobs: enough to tell a heavy request from a refused one.
+	bodyBytes   int
+	systemBytes int
+	toolChoice  string
+	maxTokens   int
+	started     time.Time
 }
 
 // useSession notes the session the response comes from; a continuation keeps
@@ -621,14 +630,17 @@ func (l *requestLog) write() {
 		"%s model=%q agy_model=%q level=%s messages=%d tools=%d scrub_hits=%d session=%s "+
 			"account=%s attempts=%d affinity=%s continued=%t "+
 			"tools_grew=%t token_near_expiry=%t orphan_results=%d denied=%d clean=%t cleanup_failed=%d "+
-			"agy_tool_calls=%d agy_usage=in:%d,out:%d,cr:%d,cw:%d,th:%d,total:%d reported=in:%d,out:%d outcome=%q seconds=%.2f",
+			"agy_tool_calls=%d agy_usage=in:%d,out:%d,cr:%d,cw:%d,th:%d,total:%d reported=in:%d,out:%d outcome=%q "+
+			"reason=%s body_bytes=%d system_bytes=%d tool_choice=%q max_tokens=%d seconds=%.2f",
 		l.id, l.model, l.agyModel, l.level, l.messages, l.tools, l.scrubHits, l.session,
 		account, l.attempts, affinity, l.continued,
 		l.toolsGrew, l.tokenNearExpiry, l.orphans, l.denied, l.clean, l.cleanupFailed,
 		l.agyToolCalls,
 		u.InputTokens, u.OutputTokens, u.CachedReadTokens, u.CachedWriteTokens, u.ThoughtTokens, u.TotalTokens,
 		reported.InputTokens, reported.OutputTokens,
-		l.outcome, time.Since(l.started).Seconds(),
+		l.outcome,
+		cmp.Or(l.reason, "-"), l.bodyBytes, l.systemBytes, cmp.Or(l.toolChoice, "-"), l.maxTokens,
+		time.Since(l.started).Seconds(),
 	)
 }
 
@@ -654,7 +666,10 @@ func (srv *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	body := &countingReader{r: r.Body}
 	r.Body = io.NopCloser(body)
 
-	if err := decodeBody(w, r, &req); err != nil {
+	err := decodeBody(w, r, &req)
+	rl.bodyBytes = body.n
+
+	if err != nil {
 		rl.outcome = reject(w, invalidRequest(err.Error()))
 
 		return
@@ -662,6 +677,9 @@ func (srv *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	rl.model = req.Model
 	rl.messages = len(req.Messages)
+	rl.systemBytes = len(req.System)
+	rl.toolChoice = toolChoiceType(&req)
+	rl.maxTokens = maxTokens(&req)
 
 	if len(req.Messages) == 0 {
 		rl.outcome = reject(w, invalidRequest("messages: at least one message is required"))
@@ -679,7 +697,9 @@ func (srv *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		rl.outcome = reject(w, asAPIError(err))
+		refusal := asAPIError(err)
+		rl.reason = refusal.reason
+		rl.outcome = reject(w, refusal)
 
 		return
 	}
@@ -879,11 +899,12 @@ func (srv *Server) resume(ctx context.Context, results []deliveredResult) (*sess
 			return nil, nil
 		}
 
-		return nil, slotFailure(ctx)
+		return nil, slotFailure(ctx, reasonResumeSlot)
 	}
 
-	// The turn may have expired while the request waited for the slot.
-	if s.ctx.Err() != nil {
+	// The turn may have expired or been evicted while the request waited for
+	// the slot.
+	if !s.resumeFromPark() {
 		s.releaseSlot()
 
 		return nil, nil
@@ -892,8 +913,6 @@ func (srv *Server) resume(ctx context.Context, results []deliveredResult) (*sess
 	for i, res := range results {
 		calls[i].result <- res.result
 	}
-
-	s.unpark()
 
 	return s, nil
 }
@@ -907,18 +926,44 @@ func (srv *Server) modelFor(requested string) baseModel {
 	return lookupModel(srv.cfg.DefaultModel)
 }
 
-// startSession admits a fresh turn: under the parked cap, with an account
-// other than exclude and with a server slot, or not at all. accountWait bounds
-// the wait for an account slot; the server slot waits what is left of the
-// configured wait.
+// evictAtParkedCap makes room for a fresh turn by ending the oldest parked
+// turns until the count is under the cap. Clients abandon tool_use turns, so
+// refusing the request that arrives now would keep it out for the whole
+// PendingTTL; the evicted turn's late result replays on a fresh session. A turn
+// agy is working on is never touched.
+func (srv *Server) evictAtParkedCap(ctx context.Context) error {
+	for srv.reg.parked() >= srv.cfg.MaxParked {
+		oldest := srv.reg.oldestParked()
+		if oldest == nil {
+			return nil
+		}
+
+		if !oldest.evictIfParked() {
+			continue
+		}
+
+		log.Printf("session %s: evicted at the parked cap", oldest.tag)
+
+		if err := endTurns(ctx, []*session{oldest}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// startSession admits a fresh turn: with an account other than exclude and with
+// a server slot, evicting the oldest parked turn when the parked cap is full,
+// or not at all. accountWait bounds the wait for an account slot; the server
+// slot waits what is left of the configured wait.
 func (srv *Server) startSession(
 	ctx context.Context,
 	spec sessionSpec,
 	exclude string,
 	accountWait time.Duration,
 ) (*session, error) {
-	if srv.reg.parked() >= srv.cfg.MaxParked {
-		return nil, overloaded("too many turns wait on tool results")
+	if err := srv.evictAtParkedCap(ctx); err != nil {
+		return nil, err
 	}
 
 	started := time.Now()
@@ -935,7 +980,7 @@ func (srv *Server) startSession(
 	if err := s.acquireSlot(ctx, srv.cfg.SlotWait-time.Since(started)); err != nil {
 		s.cancel()
 
-		return nil, slotFailure(ctx)
+		return nil, slotFailure(ctx, reasonSlotWait)
 	}
 
 	srv.lifeMu.Lock()
@@ -945,7 +990,7 @@ func (srv *Server) startSession(
 		s.releaseSlot()
 		s.cancel()
 
-		return nil, overloaded("the bridge is shutting down")
+		return nil, refused(reasonShutdown, "the bridge is shutting down")
 	}
 
 	srv.reg.add(s)
@@ -986,12 +1031,27 @@ func (srv *Server) retry(ctx context.Context, s *session, err error, out respond
 	return next
 }
 
-func slotFailure(ctx context.Context) error {
+// Why the bridge refuses a request with 529, as the request log names it.
+const (
+	reasonSlotWait   = "slot_wait"
+	reasonResumeSlot = "resume_slot"
+	reasonShutdown   = "shutdown"
+)
+
+// refused is a 529 the bridge sends itself, tagged with its cause for the log.
+func refused(reason, message string) *apiError {
+	failure := overloaded(message)
+	failure.reason = reason
+
+	return failure
+}
+
+func slotFailure(ctx context.Context, reason string) error {
 	if ctx.Err() != nil {
 		return errClientGone
 	}
 
-	return overloaded("no free agy slot")
+	return refused(reason, "no free agy slot")
 }
 
 // acquireFailure maps a failed account lease to what the client sees.
@@ -1002,10 +1062,10 @@ func acquireFailure(ctx context.Context, err error) error {
 	}
 
 	if errors.Is(err, errNoSlot) || ctx.Err() != nil {
-		return slotFailure(ctx)
+		return slotFailure(ctx, reasonSlotWait)
 	}
 
-	return overloaded("the bridge is shutting down")
+	return refused(reasonShutdown, "the bridge is shutting down")
 }
 
 func (srv *Server) handleCountTokens(w http.ResponseWriter, r *http.Request) {

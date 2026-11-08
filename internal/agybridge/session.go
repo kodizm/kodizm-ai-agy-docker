@@ -251,10 +251,15 @@ type session struct {
 	// cleanupFailed counts removals of agy's home that failed.
 	cleanupFailed atomic.Int64
 
+	// stderr holds the tail of agy's stderr, logged once agy is gone.
+	stderr tailBuffer
+
 	mu      sync.Mutex
 	hasSlot bool
 	parked  bool
-	expiry  *time.Timer
+	// parkedAt is when the turn last parked; it orders the eviction at the cap.
+	parkedAt time.Time
+	expiry   *time.Timer
 	// failure is the first upstream failure of the session, already settled
 	// with the pool.
 	failure *failure
@@ -351,16 +356,50 @@ func (s *session) park() {
 	s.releaseSlotLocked()
 	s.stopExpiryLocked()
 	s.parked = true
+	s.parkedAt = time.Now()
 	s.expiry = time.AfterFunc(s.ttl, s.cancel)
 }
 
-// unpark resumes a parked turn; the caller already holds a slot for it.
+// unpark ends the parked state; the caller already holds a slot for the turn.
 func (s *session) unpark() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.parked = false
 	s.stopExpiryLocked()
+}
+
+// resumeFromPark unparks a turn for its tool results, or reports false when it
+// was cancelled first (expired, or evicted at the parked cap). Checking and
+// unparking under one lock is what settles a race with evictIfParked: exactly
+// one of them wins.
+func (s *session) resumeFromPark() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.ctx.Err() != nil {
+		return false
+	}
+
+	s.parked = false
+	s.stopExpiryLocked()
+
+	return true
+}
+
+// evictIfParked cancels the turn only while it is parked: a turn agy is working
+// on keeps its slot, and one a resume has just unparked is not touched.
+func (s *session) evictIfParked() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.parked {
+		return false
+	}
+
+	s.cancel()
+
+	return true
 }
 
 // lacksAnyOf reports whether a tool is not among those agy listed for the session.
@@ -721,6 +760,30 @@ func (r *registry) parked() int {
 	return n
 }
 
+// oldestParked is the session that has waited longest on tool results, or nil
+// when none is parked.
+func (r *registry) oldestParked() *session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var (
+		oldest   *session
+		oldestAt time.Time
+	)
+
+	for _, s := range r.sessions {
+		s.mu.Lock()
+		parked, at := s.parked, s.parkedAt
+		s.mu.Unlock()
+
+		if parked && (oldest == nil || at.Before(oldestAt)) {
+			oldest, oldestAt = s, at
+		}
+	}
+
+	return oldest
+}
+
 func (r *registry) size() (sessions, calls int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -773,6 +836,9 @@ func (srv *Server) runSession(s *session, spec sessionSpec) {
 	defer s.cancel()
 
 	end, err := srv.converse(s, spec)
+
+	s.logStderrTail(err)
+
 	if err != nil {
 		s.events.push(event{kind: eventFailed, err: s.failureFor(err)})
 
@@ -784,6 +850,17 @@ func (srv *Server) runSession(s *session, spec sessionSpec) {
 	}
 
 	s.events.push(event{kind: eventDone, end: end})
+}
+
+// logStderrTail logs what agy wrote to stderr when its turn failed. agy is
+// reaped by now, so the tail is complete; a turn cancelled on purpose (evicted,
+// client gone, shutdown) says nothing worth logging.
+func (s *session) logStderrTail(err error) {
+	failed := s.recordedFailure() != nil || (err != nil && s.ctx.Err() == nil)
+
+	if tail := s.stderr.masked(); failed && tail != "" {
+		log.Printf("session %s: agy stderr_tail=%q", s.tag, tail)
+	}
 }
 
 func (srv *Server) converse(s *session, spec sessionSpec) (turnEnd, error) {
@@ -811,7 +888,7 @@ func (srv *Server) converse(s *session, spec sessionSpec) (turnEnd, error) {
 		extraArgs = cleanArgs()
 	}
 
-	a, err := startAgent(s.ctx, srv.cfg.AgyBin, extraArgs, home, s.onChunk, s.onDenied, s.onToolCall)
+	a, err := startAgent(s.ctx, srv.cfg.AgyBin, extraArgs, home, &s.stderr, s.onChunk, s.onDenied, s.onToolCall)
 	if err != nil {
 		return turnEnd{}, err
 	}
@@ -850,7 +927,14 @@ func (srv *Server) converse(s *session, spec sessionSpec) (turnEnd, error) {
 		return turnEnd{}, err
 	}
 
-	return turnEnd{stopReason: stopReason(result.StopReason), usage: result.Usage}, nil
+	// stopReason folds every reason but max_tokens into end_turn, so a refusal
+	// or a cancel agy reported would otherwise leave no trace.
+	mapped := stopReason(result.StopReason)
+	if mapped != result.StopReason {
+		log.Printf("session %s: agy stopReason=%q reported as %s", s.tag, result.StopReason, mapped)
+	}
+
+	return turnEnd{stopReason: mapped, usage: result.Usage}, nil
 }
 
 func (srv *Server) sessionParams(s *session, spec sessionSpec) (newSessionParams, error) {

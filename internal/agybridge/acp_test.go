@@ -188,6 +188,38 @@ func TestBannerMessageCarriesNoEmail(t *testing.T) {
 	}
 }
 
+func TestStderrTailKeepsOnlyTheLastBytes(t *testing.T) {
+	var tail tailBuffer
+
+	huge := strings.Repeat("x ", 3*stderrTailBytes)
+	if n, err := tail.Write([]byte(huge + "end")); n != len(huge)+3 || err != nil {
+		t.Fatalf("Write = %d, %v", n, err)
+	}
+
+	if _, err := tail.Write([]byte(" mail a@b.co")); err != nil {
+		t.Fatal(err)
+	}
+
+	got := tail.masked()
+	if len(tail.buf) != stderrTailBytes || !strings.HasSuffix(got, "end mail <email>") {
+		t.Fatalf("tail holds %d bytes, masked %q", len(tail.buf), got[max(0, len(got)-40):])
+	}
+}
+
+func TestStderrTailMasksATokenLikeRun(t *testing.T) {
+	var tail tailBuffer
+
+	secret := strings.Repeat("a1B2", 12)
+	if _, err := tail.Write([]byte("Authorization: Bearer " + secret + " done")); err != nil {
+		t.Fatal(err)
+	}
+
+	got := tail.masked()
+	if strings.Contains(got, secret) || !strings.HasSuffix(got, "Bearer <redacted> done") {
+		t.Fatalf("masked %q", got)
+	}
+}
+
 func TestFailureAPIError(t *testing.T) {
 	tests := []struct {
 		f      failure
