@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -266,11 +267,106 @@ func clientTools(defs []toolDef) []mcpTool {
 		tools = append(tools, mcpTool{
 			Name:        d.Name,
 			Description: d.Description,
-			InputSchema: schema,
+			InputSchema: stringEnumsOnly(schema),
 		})
 	}
 
 	return tools
+}
+
+// stringEnumsOnly rewrites a tool schema for Gemini, which agy passes it to
+// as a function declaration: Gemini rejects an enum on any type but string
+// and agy then ends the whole turn ("Agent execution terminated"). Each such
+// enum is removed and its values go into the description, so the model still
+// sees the allowed values. A schema that needs no rewrite, or that is not
+// valid JSON, comes back byte for byte; it is the client's to get right.
+func stringEnumsOnly(schema json.RawMessage) json.RawMessage {
+	dec := json.NewDecoder(bytes.NewReader(schema))
+	dec.UseNumber()
+
+	var root any
+	if err := dec.Decode(&root); err != nil {
+		return schema
+	}
+
+	if !rewriteEnums(root) {
+		return schema
+	}
+
+	rewritten, err := json.Marshal(root)
+	if err != nil {
+		return schema
+	}
+
+	return rewritten
+}
+
+// rewriteEnums walks a decoded schema, rewrites every enum Gemini refuses in
+// place and reports whether it changed anything.
+func rewriteEnums(node any) bool {
+	changed := false
+
+	switch n := node.(type) {
+	case map[string]any:
+		if values, ok := n["enum"].([]any); ok && !stringEnum(n["type"], values) {
+			delete(n, "enum")
+			n["description"] = describeAllowed(n["description"], values)
+			changed = true
+		}
+
+		for _, child := range n {
+			changed = rewriteEnums(child) || changed
+		}
+	case []any:
+		for _, child := range n {
+			changed = rewriteEnums(child) || changed
+		}
+	}
+
+	return changed
+}
+
+// stringEnum reports whether an enum is one Gemini takes: a declared type
+// that is string (or absent, or a list such as ["string", "null"]) and values
+// that are strings, null allowed.
+func stringEnum(declared any, values []any) bool {
+	if name, ok := declared.(string); ok && name != "string" {
+		return false
+	}
+
+	for _, value := range values {
+		switch value.(type) {
+		case string, nil:
+		default:
+			return false
+		}
+	}
+
+	return true
+}
+
+// describeAllowed appends an enum's values to a schema description.
+func describeAllowed(existing any, values []any) string {
+	rendered := make([]string, 0, len(values))
+
+	for _, value := range values {
+		switch v := value.(type) {
+		case string:
+			rendered = append(rendered, strconv.Quote(v))
+		case nil:
+			rendered = append(rendered, "null")
+		default:
+			rendered = append(rendered, fmt.Sprint(v))
+		}
+	}
+
+	allowed := "one of: " + strings.Join(rendered, ", ")
+
+	if text, ok := existing.(string); ok && strings.TrimSpace(text) != "" {
+		return strings.TrimSpace(text) + " (" + allowed + ")"
+	}
+
+	return "One of: " + strings.Join(rendered, ", ")
 }
 
 // toolNames returns the tools' names sorted, duplicates kept.

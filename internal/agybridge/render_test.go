@@ -159,6 +159,95 @@ func TestClientTools(t *testing.T) {
 	}
 }
 
+func TestClientToolsRewritesNonStringEnums(t *testing.T) {
+	var defs []toolDef
+
+	raw := `[{"name":"pick","input_schema":{"type":"object","properties":{"n":{"type":"integer","enum":[1,2]}}}}]`
+
+	if err := json.Unmarshal([]byte(raw), &defs); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := json.Marshal(clientTools(defs))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := `[{"name":"pick","description":"","inputSchema":` +
+		`{"properties":{"n":{"description":"One of: 1, 2","type":"integer"}},"type":"object"}}]`
+
+	if string(got) != want {
+		t.Fatalf("clientTools =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// agy hands a tool schema to Gemini, which rejects an enum on anything but a
+// string and ends the whole turn: the enum moves into the description.
+func TestStringEnumsOnly(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+		want   string
+	}{
+		{
+			name:   "integer enum without description",
+			schema: `{"type":"object","properties":{"n":{"type":"integer","enum":[1,2]}}}`,
+			want:   `{"properties":{"n":{"description":"One of: 1, 2","type":"integer"}},"type":"object"}`,
+		},
+		{
+			name:   "boolean enum keeps its description",
+			schema: `{"type":"object","properties":{"b":{"type":"boolean","enum":[true,false],"description":"Flag"}}}`,
+			want:   `{"properties":{"b":{"description":"Flag (one of: true, false)","type":"boolean"}},"type":"object"}`,
+		},
+		{
+			name:   "number enum",
+			schema: `{"type":"number","enum":[0.5,1.5]}`,
+			want:   `{"description":"One of: 0.5, 1.5","type":"number"}`,
+		},
+		{
+			name:   "mixed values without a type",
+			schema: `{"enum":[1,"a"]}`,
+			want:   `{"description":"One of: 1, \"a\""}`,
+		},
+		{
+			name:   "nested in items and anyOf",
+			schema: `{"type":"array","items":{"anyOf":[{"type":"integer","enum":[3]},{"type":"string","enum":["x"]}]}}`,
+			want: `{"items":{"anyOf":[{"description":"One of: 3","type":"integer"},` +
+				`{"enum":["x"],"type":"string"}]},"type":"array"}`,
+		},
+		{
+			name:   "a property named enum is not an enum",
+			schema: `{"type":"object","properties":{"enum":{"type":"integer","enum":[7]},"type":{"type":"string"}}}`,
+			want: `{"properties":{"enum":{"description":"One of: 7","type":"integer"},` +
+				`"type":{"type":"string"}},"type":"object"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stringEnumsOnly(json.RawMessage(tt.schema))
+
+			if string(got) != tt.want {
+				t.Fatalf("stringEnumsOnly =\n%s\nwant\n%s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStringEnumsOnlyLeavesAcceptedSchemasUntouched(t *testing.T) {
+	for _, schema := range []string{
+		`{"type":"object","required":["path"],"properties":{"mode":{"type":"string","enum":["r","w"]}}}`,
+		`{"enum":["a","b"]}`,
+		`{"type":["string","null"],"enum":["a",null]}`,
+		`{"type":"object"}`,
+		`not json`,
+	} {
+		if got := stringEnumsOnly(json.RawMessage(schema)); string(got) != schema {
+			t.Fatalf("stringEnumsOnly(%s) = %s, want it unchanged", schema, got)
+		}
+	}
+}
+
 func TestToolResults(t *testing.T) {
 	messages := []message{
 		{Role: "user", Content: json.RawMessage(`"start"`)},
