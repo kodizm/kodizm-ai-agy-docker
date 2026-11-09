@@ -114,6 +114,15 @@ type responder interface {
 	pristine() bool
 }
 
+// newResponder answers a request as the format it asked for: an SSE stream or one JSON message.
+func newResponder(w http.ResponseWriter, req *messagesRequest, id string) responder {
+	if req.Stream {
+		return &sseResponder{w: w, rc: http.NewResponseController(w), id: id, model: req.Model}
+	}
+
+	return &collector{w: w, id: id, model: req.Model}
+}
+
 // messageBody is an Anthropic message; a struct keeps its field order.
 type messageBody struct {
 	ID           string       `json:"id"`

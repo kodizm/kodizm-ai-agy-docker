@@ -259,39 +259,164 @@ var noToolsReminder = []string{"Do NOT call any tools", "Respond with plain text
 // tools calls one, the response ends as tool_use, and the compaction fails as an empty summary. Claude Code
 // appends system messages after the last user message on every step, so those are skipped.
 func forbidsTools(messages []message) bool {
+	return lastUserHasAll(messages, noToolsReminder)
+}
+
+// The request Claude Code forks a running background agent with, about every half minute, to label its progress:
+// the agent's whole history, its tools (denied on the client side) and a prompt of the form "Describe your most
+// recent action in 3-5 words using present tense (-ing). ... Do not use tools." The history ends in tool results,
+// so the prompt joins that user message as a text block of its own.
+const (
+	progressLabelStart   = "Describe your most recent action in 3-5 words using present tense (-ing)."
+	progressLabelNoTools = "Do not use tools."
+)
+
+// asksProgressLabel reports whether the conversation ends in a progress label request: its last text block
+// opens a line with the prompt and holds the no-tools sentence. A brief that merely quotes the prompt inside a
+// sentence is not one. Answering a real one through agy replays the history into a fresh session, the model
+// calls a tool the client has already denied, and the session parks until the cap evicts it.
+func asksProgressLabel(messages []message) bool {
+	texts := lastUserTexts(messages)
+	if len(texts) == 0 {
+		return false
+	}
+
+	last := texts[len(texts)-1]
+
+	return strings.Contains(last, progressLabelNoTools) &&
+		(strings.HasPrefix(last, progressLabelStart) || strings.Contains(last, "\n"+progressLabelStart))
+}
+
+// lastUserHasAll reports whether the text of the last user message holds every phrase.
+func lastUserHasAll(messages []message, phrases []string) bool {
+	text := strings.Join(lastUserTexts(messages), "\n")
+
+	return !slices.ContainsFunc(phrases, func(phrase string) bool { return !strings.Contains(text, phrase) })
+}
+
+// lastUserTexts is the text of the last user message, one entry per text block (a plain string is one entry),
+// nil when the conversation does not end in a user message. The system messages Claude Code appends after it on
+// every step are skipped.
+func lastUserTexts(messages []message) []string {
 	last := len(messages) - 1
 	for last >= 0 && messages[last].Role == "system" {
 		last--
 	}
 
 	if last < 0 || messages[last].Role != "user" {
-		return false
+		return nil
 	}
 
 	text, blocks, err := decodeContent(messages[last].Content)
 	if err != nil {
-		return false
+		return nil
 	}
 
-	if blocks != nil {
-		parts := make([]string, 0, len(blocks))
+	if blocks == nil {
+		return []string{text}
+	}
 
-		for _, b := range blocks {
-			if b.Type == "text" {
-				parts = append(parts, b.Text)
+	texts := make([]string, 0, len(blocks))
+
+	for _, b := range blocks {
+		if b.Type == "text" {
+			texts = append(texts, b.Text)
+		}
+	}
+
+	return texts
+}
+
+// maxProgressLabelRunes bounds a progress label: the client shows it in one line beside the agent.
+const maxProgressLabelRunes = 48
+
+// progressLabel names the agent's most recent action from the last tool call in its history, in the present
+// tense and a few words, which is what the label request asks for. The tool names are Claude Code's.
+func progressLabel(messages []message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+
+		_, blocks, err := decodeContent(messages[i].Content)
+		if err != nil {
+			continue
+		}
+
+		for j := len(blocks) - 1; j >= 0; j-- {
+			if blocks[j].Type == "tool_use" {
+				return cutRunes(toolLabel(blocks[j].Name, blocks[j].Input), maxProgressLabelRunes)
+			}
+		}
+	}
+
+	return "Starting work"
+}
+
+// toolLabel words one tool call; an input of an unexpected shape only loses the object of the sentence.
+func toolLabel(name string, raw json.RawMessage) string {
+	var input map[string]any
+
+	_ = json.Unmarshal(raw, &input)
+
+	field := func(keys ...string) string {
+		for _, key := range keys {
+			if value, ok := input[key].(string); ok && value != "" {
+				return value
 			}
 		}
 
-		text = strings.Join(parts, "\n")
+		return ""
 	}
 
-	for _, phrase := range noToolsReminder {
-		if !strings.Contains(text, phrase) {
-			return false
+	switch strings.ToLower(name) {
+	case "read":
+		return "Reading " + baseName(field("file_path", "path"))
+	case "edit", "multiedit", "notebookedit":
+		return "Editing " + baseName(field("file_path", "notebook_path", "path"))
+	case "write":
+		return "Writing " + baseName(field("file_path", "path"))
+	case "bash":
+		command := field("command")
+
+		// A leading "cd <dir> &&" says where, not what.
+		if strings.HasPrefix(command, "cd ") {
+			if _, rest, found := strings.Cut(command, "&&"); found {
+				command = rest
+			}
 		}
+
+		words := strings.Fields(command)
+
+		return "Running " + cmp.Or(strings.Join(words[:min(len(words), 3)], " "), "a command")
+	case "grep":
+		return "Searching for " + cmp.Or(field("pattern"), "text")
+	case "glob":
+		return "Finding " + cmp.Or(field("pattern"), "files")
+	case "agent", "task":
+		return "Delegating to a subagent"
+	default:
+		return "Using " + name
+	}
+}
+
+// baseName is the last element of a path, "files" when there is none.
+func baseName(path string) string {
+	if i := strings.LastIndexAny(path, `/\`); i >= 0 {
+		path = path[i+1:]
 	}
 
-	return true
+	return cmp.Or(path, "files")
+}
+
+// cutRunes keeps the first n runes of s.
+func cutRunes(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+
+	return string(runes[:n])
 }
 
 // clientTools keeps the tools the client runs itself; server tools such as

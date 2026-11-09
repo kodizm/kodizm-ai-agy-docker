@@ -152,6 +152,81 @@ func TestNoToolsReminderRunsWithoutClientTools(t *testing.T) {
 	}
 }
 
+// Every half minute Claude Code forks a running background agent for a progress label: the whole history, the same
+// tools (denied on its own side) and a request for three to five words. Through agy that replays the history into a
+// new session, which the model answers with a tool call that nobody takes, so the session parks until the cap
+// evicts it. The label comes from the agent's last tool call instead: no session starts, and the live turn the
+// fork's tool result shares an id with stays parked and resumes.
+func TestProgressLabelRequestStartsNoAgy(t *testing.T) {
+	logs := captureLog(t)
+	b := newBridge(t, nil)
+
+	first := userText("SCRIPT:tool label")
+
+	_, held, _, _ := b.turn(t, false, first)
+	if len(held) != 1 {
+		t.Fatalf("the first turn held %d calls, want 1", len(held))
+	}
+
+	// The fork's history ends in the live turn's tool result; the prompt joins that user message.
+	read := []toolUse{{id: held[0].id, name: "Read", input: `{"file_path":"/repo/internal/render.go"}`}}
+	fork := lateResult(first, read, "ok")
+	last := fork[len(fork)-1]
+	last["content"] = append(last["content"].([]map[string]any), map[string]any{"type": "text", "text": progressPrompt})
+	fork = append(fork, map[string]any{"role": "system", "content": "a note from the harness"})
+
+	for _, stream := range []bool{false, true} {
+		text, calls, stop, use := b.turn(t, stream, fork)
+
+		if text != "Reading render.go" || len(calls) != 0 || stop != "end_turn" {
+			t.Fatalf("stream=%t: label request answered %q %+v stop %q, want the label and end_turn", stream, text, calls, stop)
+		}
+
+		// A gateway reads a reply without usage as a lost one and books the whole history as its input.
+		if use.InputTokens < 1 || use.OutputTokens < 1 {
+			t.Fatalf("stream=%t: usage %+v, want the label's own tokens", stream, use)
+		}
+	}
+
+	if n := b.spawned(t); n != 1 {
+		t.Fatalf("agy started %d times, want only the live turn's", n)
+	}
+
+	if sessions, calls := b.srv.reg.size(); sessions != 1 || calls != 1 {
+		t.Fatalf("registry holds %d sessions and %d calls, want the live turn's one each", sessions, calls)
+	}
+
+	// The same prompt in a request that carries no tools is someone's own prompt: it goes on to agy.
+	resp := b.post(t, map[string]any{"model": "x", "messages": []map[string]any{{"role": "user", "content": []map[string]any{
+		{"type": "text", "text": "SCRIPT:plain"},
+		{"type": "text", "text": progressPrompt},
+	}}}})
+	expectStatus(t, resp, http.StatusOK)
+
+	if got := decodeJSON[messageResponse](t, resp); got.Content[0].Text != "Hello, world" {
+		t.Fatalf("a toolless request with the prompt answered %+v, want agy's reply", got.Content)
+	}
+
+	if n := b.spawned(t); n != 2 {
+		t.Fatalf("agy started %d times, want the live turn's and the toolless request's", n)
+	}
+
+	// The live turn still resumes with its result.
+	if text, _, _, _ := b.turn(t, false, lateResult(first, held, "ok")); text != "Tool said: ok" {
+		t.Fatalf("the live turn answered %q after the label requests", text)
+	}
+
+	if n := b.spawned(t); n != 2 {
+		t.Fatalf("the continuation started agy: %d spawns, want the same two", n)
+	}
+
+	b.waitIdle(t)
+
+	if line := logs.String(); !strings.Contains(line, `outcome="end_turn local"`) {
+		t.Fatalf("want the local answer in the request lines:\n%s", line)
+	}
+}
+
 // agy cannot refresh the access-only token it was spawned with: a parked turn
 // whose token is about to run out is not resumed but replayed into a fresh
 // session, which takes a fresh token. A login that refreshes itself resumes.

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -657,6 +658,28 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// answerProgressLabel ends a progress label request with the label of the agent's last tool call. No agy ran, so
+// the request line names no session and no account. The usage is the label's own, never zero: a gateway reads a
+// reply without usage as a lost one and books the whole history as its input estimate.
+func answerProgressLabel(out responder, req *messagesRequest, rl *requestLog) string {
+	rl.session = "local"
+	label := progressLabel(req.Messages)
+
+	err := out.text(label)
+	if err == nil {
+		err = out.finish(turnEnd{
+			stopReason: "end_turn",
+			usage:      agyUsage{InputTokens: 1, OutputTokens: max(1, utf8.RuneCountInString(label)/4)},
+		})
+	}
+
+	if err != nil {
+		return "end_turn local, client gone"
+	}
+
+	return "end_turn local"
+}
+
 func (srv *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	rl := &requestLog{id: "msg_" + randomHex(12), clean: srv.cfg.Clean, started: time.Now()}
 	defer rl.write()
@@ -687,7 +710,16 @@ func (srv *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Every refusal (bad input, no slot, parked cap) leaves before any
+	// 1. A progress label request never reaches agy: it opens no session and touches no held turn, even when
+	// its tool results carry the id of one. The fork carries the agent's tools, so a request without any is
+	// someone's own prompt and goes on to agy.
+	if len(req.Tools) > 0 && asksProgressLabel(req.Messages) {
+		rl.outcome = answerProgressLabel(newResponder(w, &req, rl.id), &req, rl)
+
+		return
+	}
+
+	// 2. Every refusal (bad input, no slot, parked cap) leaves before any
 	// response byte, so the client sees a real status it can act on.
 	s, err := srv.openTurn(r.Context(), &req, rl)
 	if errors.Is(err, errClientGone) {
@@ -708,12 +740,9 @@ func (srv *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	markAccount(w, s)
 	deniedBefore := s.denied.Load()
 
-	var out responder = &collector{w: w, id: rl.id, model: req.Model}
-	if req.Stream {
-		out = &sseResponder{w: w, rc: http.NewResponseController(w), id: rl.id, model: req.Model}
-	}
+	out := newResponder(w, &req, rl.id)
 
-	// 2. Relay the turn until it ends, hands tool calls back or fails. The
+	// 3. Relay the turn until it ends, hands tool calls back or fails. The
 	// Model's timeout on the gateway is a stream's first-byte timer, and a
 	// thinking-high first call can stay silent longer than it: past
 	// firstByteAfter a stream sends its head anyway, and pings follow. From
@@ -726,7 +755,7 @@ func (srv *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	end, err := s.drive(r.Context(), out, early.C)
 
-	// 3. An account failure before any output may move a fresh turn to another
+	// 4. An account failure before any output may move a fresh turn to another
 	// account, once.
 	if next := srv.retry(r.Context(), s, err, out, rl.continued); next != nil {
 		rl.denied += s.denied.Load() - deniedBefore
