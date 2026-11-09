@@ -3,7 +3,9 @@ package agybridge
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRenderPrompt(t *testing.T) {
@@ -240,6 +242,186 @@ func TestForbidsTools(t *testing.T) {
 			}
 		})
 	}
+}
+
+// progressPrompt is what Claude Code appends when it forks a running background agent for a progress label.
+const progressPrompt = "Describe your most recent action in 3-5 words using present tense (-ing). Name the file or " +
+	"function, not the branch. Do not use tools.\n\nPrevious: \"Reading old.go\" — say something NEW.\n\n" +
+	"Good: \"Reading runAgent.ts\"\nGood: \"Running auth module tests\"\n\nBad (past tense): \"Analyzed the branch diff\""
+
+func TestAsksProgressLabel(t *testing.T) {
+	beside := func(text string) json.RawMessage {
+		return json.RawMessage(`[{"type":"tool_result","tool_use_id":"t1","content":"ok"},{"type":"text","text":` +
+			string(jsonString(text)) + `}]`)
+	}
+
+	tests := []struct {
+		name     string
+		messages []message
+		want     bool
+	}{
+		{name: "string content", messages: []message{{Role: "user", Content: jsonString(progressPrompt)}}, want: true},
+		{
+			// The agent's history ends in tool results, so the prompt joins that user message as a text block.
+			name:     "block content beside a tool result",
+			messages: []message{{Role: "user", Content: beside(progressPrompt)}},
+			want:     true,
+		},
+		{
+			name: "system message after the prompt",
+			messages: []message{
+				{Role: "user", Content: beside(progressPrompt)},
+				{Role: "system", Content: jsonString("a note from the harness")},
+			},
+			want: true,
+		},
+		{
+			// A subagent brief that quotes the prompt in a sentence must reach the model.
+			name: "the prompt quoted inside a sentence",
+			messages: []message{{Role: "user", Content: jsonString(
+				"Claude Code asks: `" + progressLabelStart + " Name the file. Do not use tools.` Explain why.",
+			)}},
+		},
+		{
+			name:     "first phrase alone",
+			messages: []message{{Role: "user", Content: jsonString(progressLabelStart)}},
+		},
+		{
+			name:     "second phrase alone",
+			messages: []message{{Role: "user", Content: jsonString("Please run it. Do not use tools.")}},
+		},
+		{
+			// Only the last text block counts: the prompt is appended after everything else.
+			name: "the prompt in an earlier block",
+			messages: []message{{Role: "user", Content: json.RawMessage(
+				`[{"type":"text","text":` + string(jsonString(progressPrompt)) + `},{"type":"text","text":"and then?"}]`,
+			)}},
+		},
+		{
+			name: "only an earlier message",
+			messages: []message{
+				{Role: "user", Content: jsonString(progressPrompt)},
+				{Role: "assistant", Content: jsonString("Reading render.go")},
+				{Role: "user", Content: jsonString("now edit the file")},
+			},
+		},
+		{name: "assistant last", messages: []message{{Role: "assistant", Content: jsonString(progressPrompt)}}},
+		{name: "no messages"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := asksProgressLabel(tt.messages); got != tt.want {
+				t.Fatalf("asksProgressLabel = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func toolUseMessage(blocks ...string) message {
+	return message{Role: "assistant", Content: json.RawMessage("[" + strings.Join(blocks, ",") + "]")}
+}
+
+func toolUseBlockJSON(name, input string) string {
+	return `{"type":"tool_use","id":"toolu_1","name":"` + name + `","input":` + input + `}`
+}
+
+func TestProgressLabel(t *testing.T) {
+	tests := []struct {
+		name     string
+		messages []message
+		want     string
+	}{
+		{
+			name:     "read",
+			messages: []message{toolUseMessage(toolUseBlockJSON("Read", `{"file_path":"/repo/internal/render.go"}`))},
+			want:     "Reading render.go",
+		},
+		{
+			name:     "edit",
+			messages: []message{toolUseMessage(toolUseBlockJSON("Edit", `{"file_path":"/repo/server.go"}`))},
+			want:     "Editing server.go",
+		},
+		{
+			name:     "write",
+			messages: []message{toolUseMessage(toolUseBlockJSON("Write", `{"file_path":"/repo/NOTES.md"}`))},
+			want:     "Writing NOTES.md",
+		},
+		{
+			name:     "bash keeps the first three words",
+			messages: []message{toolUseMessage(toolUseBlockJSON("Bash", `{"command":"go test ./... -race -count=1"}`))},
+			want:     "Running go test ./...",
+		},
+		{
+			name:     "bash skips a leading cd",
+			messages: []message{toolUseMessage(toolUseBlockJSON("Bash", `{"command":"cd /Users/anilcan/Code/kodizm.com && go vet ./..."}`))},
+			want:     "Running go vet ./...",
+		},
+		{
+			name:     "grep",
+			messages: []message{toolUseMessage(toolUseBlockJSON("Grep", `{"pattern":"forbidsTools"}`))},
+			want:     "Searching for forbidsTools",
+		},
+		{
+			name:     "glob",
+			messages: []message{toolUseMessage(toolUseBlockJSON("Glob", `{"pattern":"**/*.go"}`))},
+			want:     "Finding **/*.go",
+		},
+		{
+			name:     "subagent",
+			messages: []message{toolUseMessage(toolUseBlockJSON("Agent", `{"prompt":"review it"}`))},
+			want:     "Delegating to a subagent",
+		},
+		{
+			name:     "unknown tool",
+			messages: []message{toolUseMessage(toolUseBlockJSON("mcp__kodizm-ops__db_query", `{}`))},
+			want:     "Using mcp__kodizm-ops__db_query",
+		},
+		{
+			name:     "read without a path",
+			messages: []message{toolUseMessage(toolUseBlockJSON("Read", `{}`))},
+			want:     "Reading files",
+		},
+		{
+			name: "the last tool call of the last assistant message wins",
+			messages: []message{
+				toolUseMessage(toolUseBlockJSON("Read", `{"file_path":"/a/old.go"}`)),
+				{Role: "user", Content: jsonString("go on")},
+				toolUseMessage(
+					toolUseBlockJSON("Read", `{"file_path":"/a/first.go"}`),
+					toolUseBlockJSON("Edit", `{"file_path":"/a/second.go"}`),
+				),
+				{Role: "user", Content: jsonString("done")},
+			},
+			want: "Editing second.go",
+		},
+		{
+			name: "an assistant message of text only is skipped",
+			messages: []message{
+				toolUseMessage(toolUseBlockJSON("Read", `{"file_path":"/a/render.go"}`)),
+				{Role: "assistant", Content: jsonString("looking")},
+			},
+			want: "Reading render.go",
+		},
+		{name: "no tool call yet", messages: []message{{Role: "user", Content: jsonString("hi")}}, want: "Starting work"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := progressLabel(tt.messages); got != tt.want {
+				t.Fatalf("progressLabel = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("a long value is cut to a short label", func(t *testing.T) {
+		long := strings.Repeat("ç", 200)
+		got := progressLabel([]message{toolUseMessage(toolUseBlockJSON("Grep", `{"pattern":"`+long+`"}`))})
+
+		if n := len([]rune(got)); n > maxProgressLabelRunes || !utf8.ValidString(got) {
+			t.Fatalf("label has %d runes (valid utf-8: %t), want at most %d", n, utf8.ValidString(got), maxProgressLabelRunes)
+		}
+	})
 }
 
 func jsonString(s string) json.RawMessage {
