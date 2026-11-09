@@ -201,6 +201,23 @@ func TestForbidsTools(t *testing.T) {
 			want:     true,
 		},
 		{
+			// Claude Code appends a system message after the last user message on every step.
+			name: "system message after the reminder",
+			messages: []message{
+				{Role: "user", Content: jsonString(reminder)},
+				{Role: "system", Content: jsonString("a note from the harness")},
+				{Role: "system", Content: jsonString("another note")},
+			},
+			want: true,
+		},
+		{
+			name: "assistant message after the reminder",
+			messages: []message{
+				{Role: "user", Content: jsonString(reminder)},
+				{Role: "assistant", Content: jsonString("done")},
+			},
+		},
+		{
 			name: "only an earlier message",
 			messages: []message{
 				{Role: "user", Content: jsonString(reminder)},
