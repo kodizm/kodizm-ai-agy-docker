@@ -128,7 +128,10 @@ func TestNoToolsReminderRunsWithoutClientTools(t *testing.T) {
 		t.Fatalf("control request listed %+v, want read_file", got.Content)
 	}
 
-	resp = b.post(t, map[string]any{"model": "x", "tools": readFileTool, "messages": userText("SCRIPT:tools" + reminder)})
+	// Claude Code appends a system message after the last user message on every step.
+	withNote := append(userText("SCRIPT:tools"+reminder), map[string]any{"role": "system", "content": "a note from the harness"})
+
+	resp = b.post(t, map[string]any{"model": "x", "tools": readFileTool, "messages": withNote})
 	expectStatus(t, resp, http.StatusOK)
 
 	got := decodeJSON[messageResponse](t, resp)

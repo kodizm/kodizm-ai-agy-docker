@@ -254,15 +254,21 @@ func systemText(raw json.RawMessage) (string, error) {
 // ordinary prompts, so a message needs both.
 var noToolsReminder = []string{"Do NOT call any tools", "Respond with plain text only"}
 
-// forbidsTools reports whether the last message is a user message carrying the no-tools reminder. Claude Code's
-// compaction forks the conversation with the same tools and asks for a text summary; a model offered the tools
-// calls one, the response ends as tool_use, and the compaction fails as an empty summary.
+// forbidsTools reports whether the conversation ends in a user message carrying the no-tools reminder. Claude
+// Code's compaction forks the conversation with the same tools and asks for a text summary; a model offered the
+// tools calls one, the response ends as tool_use, and the compaction fails as an empty summary. Claude Code
+// appends system messages after the last user message on every step, so those are skipped.
 func forbidsTools(messages []message) bool {
-	if len(messages) == 0 || messages[len(messages)-1].Role != "user" {
+	last := len(messages) - 1
+	for last >= 0 && messages[last].Role == "system" {
+		last--
+	}
+
+	if last < 0 || messages[last].Role != "user" {
 		return false
 	}
 
-	text, blocks, err := decodeContent(messages[len(messages)-1].Content)
+	text, blocks, err := decodeContent(messages[last].Content)
 	if err != nil {
 		return false
 	}
