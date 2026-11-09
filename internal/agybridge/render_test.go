@@ -183,6 +183,54 @@ func TestClientToolsRewritesNonStringEnums(t *testing.T) {
 
 // agy hands a tool schema to Gemini, which rejects an enum on anything but a
 // string and ends the whole turn: the enum moves into the description.
+// Claude Code's compaction forks the conversation with the same tools and ends it with a no-tools reminder.
+// Only that reminder, in the last user message, takes the tools away.
+func TestForbidsTools(t *testing.T) {
+	const reminder = "Summarise the conversation.\n\nREMINDER: Do NOT call any tools. Respond with plain text only. " +
+		"Tool calls will be rejected."
+
+	tests := []struct {
+		name     string
+		messages []message
+		want     bool
+	}{
+		{name: "string content", messages: []message{{Role: "user", Content: jsonString(reminder)}}, want: true},
+		{
+			name:     "block content beside a tool result",
+			messages: []message{{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"t1","content":"ok"},{"type":"text","text":` + string(jsonString(reminder)) + `}]`)}},
+			want:     true,
+		},
+		{
+			name: "only an earlier message",
+			messages: []message{
+				{Role: "user", Content: jsonString(reminder)},
+				{Role: "assistant", Content: jsonString("done")},
+				{Role: "user", Content: jsonString("now edit the file")},
+			},
+		},
+		{
+			name:     "half of the reminder",
+			messages: []message{{Role: "user", Content: jsonString("Do NOT call any tools in this phase.")}},
+		},
+		{name: "assistant last", messages: []message{{Role: "assistant", Content: jsonString(reminder)}}},
+		{name: "no messages"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := forbidsTools(tt.messages); got != tt.want {
+				t.Fatalf("forbidsTools = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func jsonString(s string) json.RawMessage {
+	raw, _ := json.Marshal(s)
+
+	return raw
+}
+
 func TestStringEnumsOnly(t *testing.T) {
 	tests := []struct {
 		name   string

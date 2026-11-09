@@ -249,6 +249,45 @@ func systemText(raw json.RawMessage) (string, error) {
 	return strings.Join(parts, "\n\n"), nil
 }
 
+// noToolsReminder holds the two phrases of the reminder Claude Code ends its compaction request with
+// ("REMINDER: Do NOT call any tools. Respond with plain text only ..."). Either one alone also appears in
+// ordinary prompts, so a message needs both.
+var noToolsReminder = []string{"Do NOT call any tools", "Respond with plain text only"}
+
+// forbidsTools reports whether the last message is a user message carrying the no-tools reminder. Claude Code's
+// compaction forks the conversation with the same tools and asks for a text summary; a model offered the tools
+// calls one, the response ends as tool_use, and the compaction fails as an empty summary.
+func forbidsTools(messages []message) bool {
+	if len(messages) == 0 || messages[len(messages)-1].Role != "user" {
+		return false
+	}
+
+	text, blocks, err := decodeContent(messages[len(messages)-1].Content)
+	if err != nil {
+		return false
+	}
+
+	if blocks != nil {
+		parts := make([]string, 0, len(blocks))
+
+		for _, b := range blocks {
+			if b.Type == "text" {
+				parts = append(parts, b.Text)
+			}
+		}
+
+		text = strings.Join(parts, "\n")
+	}
+
+	for _, phrase := range noToolsReminder {
+		if !strings.Contains(text, phrase) {
+			return false
+		}
+	}
+
+	return true
+}
+
 // clientTools keeps the tools the client runs itself; server tools such as
 // web_search carry their own type and are not handed to agy.
 func clientTools(defs []toolDef) []mcpTool {

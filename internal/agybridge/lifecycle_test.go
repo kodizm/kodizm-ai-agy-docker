@@ -112,6 +112,43 @@ func TestToolSetGrowthReplaysInAFreshSession(t *testing.T) {
 	}
 }
 
+// Claude Code's compaction sends the conversation with every tool and a reminder that none may be called. A model
+// that is offered the tools calls one anyway, the response ends as tool_use and the compaction reads that as an
+// empty summary, so a request carrying the reminder runs without the client's tools.
+func TestNoToolsReminderRunsWithoutClientTools(t *testing.T) {
+	logs := captureLog(t)
+	b := newBridge(t, nil)
+	reminder := "\n\nREMINDER: Do NOT call any tools. Respond with plain text only. Tool calls will be rejected."
+
+	// The same request without the reminder lists the tool.
+	resp := b.post(t, map[string]any{"model": "x", "tools": readFileTool, "messages": userText("SCRIPT:tools")})
+	expectStatus(t, resp, http.StatusOK)
+
+	if got := decodeJSON[messageResponse](t, resp); got.Content[0].Text != "read_file" {
+		t.Fatalf("control request listed %+v, want read_file", got.Content)
+	}
+
+	resp = b.post(t, map[string]any{"model": "x", "tools": readFileTool, "messages": userText("SCRIPT:tools" + reminder)})
+	expectStatus(t, resp, http.StatusOK)
+
+	got := decodeJSON[messageResponse](t, resp)
+	for _, block := range got.Content {
+		if strings.Contains(block.Text, "read_file") {
+			t.Fatalf("a request with the reminder still listed the tool: %+v", got.Content)
+		}
+	}
+
+	if got.StopReason != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn", got.StopReason)
+	}
+
+	b.waitIdle(t)
+
+	if line := logs.String(); !strings.Contains(line, "tools=0 ") {
+		t.Fatalf("want tools=0 in the request line of the reminder request:\n%s", line)
+	}
+}
+
 // agy cannot refresh the access-only token it was spawned with: a parked turn
 // whose token is about to run out is not resumed but replayed into a fresh
 // session, which takes a fresh token. A login that refreshes itself resumes.

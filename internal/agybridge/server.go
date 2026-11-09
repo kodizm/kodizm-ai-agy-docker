@@ -775,6 +775,13 @@ func (srv *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 // starts a fresh one that replays the conversation as text.
 func (srv *Server) openTurn(ctx context.Context, req *messagesRequest, rl *requestLog) (*session, error) {
 	tools := clientTools(req.Tools)
+
+	// A request that says no tool may be called runs without the client's tools, so the model can only answer
+	// in text.
+	if forbidsTools(req.Messages) {
+		tools = nil
+	}
+
 	rl.tools = len(tools)
 
 	results, extra, err := toolResults(req.Messages)
