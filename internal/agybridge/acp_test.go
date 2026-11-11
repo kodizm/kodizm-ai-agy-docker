@@ -1,6 +1,7 @@
 package agybridge
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -235,5 +236,58 @@ func TestFailureAPIError(t *testing.T) {
 		if got := tt.f.apiError("m"); got.status != tt.status || got.kind != tt.kind || got.message != "m" {
 			t.Fatalf("apiError = %+v, want %d %s", got, tt.status, tt.kind)
 		}
+	}
+}
+
+func TestParsePromptCapabilities(t *testing.T) {
+	both := promptCapabilities{image: true, embeddedContext: true}
+
+	tests := []struct {
+		name   string
+		result string
+		want   promptCapabilities
+	}{
+		{
+			name:   "v1 advertises both",
+			result: `{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":true,"audio":true,"embeddedContext":true}}}`,
+			want:   both,
+		},
+		{
+			name:   "v1 image only",
+			result: `{"agentCapabilities":{"promptCapabilities":{"image":true,"embeddedContext":false}}}`,
+			want:   promptCapabilities{image: true},
+		},
+		{
+			name:   "v2 draft takes an object as advertised and null as not",
+			result: `{"agentCapabilities":{"prompt":{"image":{},"embeddedContext":null}}}`,
+			want:   promptCapabilities{image: true},
+		},
+		{
+			name:   "v2 draft advertises both",
+			result: `{"agentCapabilities":{"prompt":{"image":{},"audio":{},"embeddedContext":{}}}}`,
+			want:   both,
+		},
+		{
+			name:   "either shape counts",
+			result: `{"agentCapabilities":{"promptCapabilities":{"image":true},"prompt":{"embeddedContext":{}}}}`,
+			want:   both,
+		},
+		{name: "empty capabilities", result: `{"protocolVersion":1,"agentCapabilities":{}}`},
+		{name: "no capabilities", result: `{"protocolVersion":1}`},
+		{name: "capabilities of another shape", result: `{"agentCapabilities":"all"}`},
+		{
+			name:   "flags of another type",
+			result: `{"agentCapabilities":{"promptCapabilities":{"image":"true","embeddedContext":1},"prompt":{"image":true}}}`,
+		},
+		{name: "null result", result: `null`},
+		{name: "not json", result: `not json`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parsePromptCapabilities(json.RawMessage(tt.result)); got != tt.want {
+				t.Fatalf("parsePromptCapabilities = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }

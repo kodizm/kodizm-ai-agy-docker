@@ -116,8 +116,9 @@ func requestLevel(req *messagesRequest) string {
 }
 
 // imageBytes is the base64 an image block carries, in the messages and inside
-// tool results. agy never gets it (an image renders as a placeholder), so it
-// is not context. A message that does not decode was refused by the render.
+// tool results. It is not text agy reads, so a quarter of its bytes says
+// nothing about the context. A message that does not decode was refused by the
+// render.
 func imageBytes(messages []message) int {
 	total := 0
 
@@ -169,6 +170,8 @@ type contentBlock struct {
 	IsError   bool            `json:"is_error"`
 	ToolName  string          `json:"tool_name"`
 	Source    json.RawMessage `json:"source"`
+	// Title stays raw: a document title of an odd shape only loses the name.
+	Title json.RawMessage `json:"title"`
 }
 
 type toolDef struct {
@@ -197,34 +200,44 @@ type deliveredResult struct {
 	result toolResult
 }
 
-// renderPrompt flattens the conversation into the single text prompt agy
-// takes: earlier messages become a history section, the last one follows.
-func renderPrompt(messages []message) (string, error) {
-	if len(messages) == 0 {
-		return "", nil
+// renderPrompt renders the conversation into the one prompt agy takes:
+// earlier messages become a history section, the last one follows, and each
+// attachment stays where it occurred.
+func renderPrompt(messages []message) (prompt, error) {
+	var r promptRenderer
+
+	switch len(messages) {
+	case 0:
+		return nil, nil
+	case 1:
+		return r.content(messages[0].Content)
 	}
 
-	last, err := contentText(messages[len(messages)-1].Content)
-	if err != nil {
-		return "", err
-	}
+	p := textPrompt("<conversation_history>\n")
 
-	if len(messages) == 1 {
-		return last, nil
-	}
-
-	history := make([]string, 0, len(messages)-1)
-
-	for _, m := range messages[:len(messages)-1] {
-		text, err := contentText(m.Content)
+	for i, m := range messages[:len(messages)-1] {
+		content, err := r.content(m.Content)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 
-		history = append(history, "["+m.Role+"]\n"+text)
+		if i > 0 {
+			p.addText("\n\n")
+		}
+
+		p.addText("[" + m.Role + "]\n")
+		p.add(content)
 	}
 
-	return "<conversation_history>\n" + strings.Join(history, "\n\n") + "\n</conversation_history>\n\n" + last, nil
+	last, err := r.content(messages[len(messages)-1].Content)
+	if err != nil {
+		return nil, err
+	}
+
+	p.addText("\n</conversation_history>\n\n")
+	p.add(last)
+
+	return p, nil
 }
 
 // systemText joins the text of a system field given as a string or blocks.
@@ -553,7 +566,8 @@ func toolNames(tools []mcpTool) []string {
 
 // toolResults returns the tool_result blocks of the last user message, and
 // whether that message carries anything else worth reading (a note, an
-// image). A held turn can only take the results, so extra content means the
+// image) or a result carries an attachment agy might take as a block. A held
+// turn can only take the results as text, so extra content means the
 // conversation has to be replayed instead.
 //
 // Claude Code follows a tool result with system messages of its own (a token
@@ -587,7 +601,10 @@ func toolResults(messages []message) ([]deliveredResult, bool, error) {
 		return nil, false, err
 	}
 
-	var results []deliveredResult
+	var (
+		results []deliveredResult
+		r       promptRenderer
+	)
 
 	extra := false
 
@@ -598,15 +615,17 @@ func toolResults(messages []message) ([]deliveredResult, bool, error) {
 			continue
 		}
 
-		text, err := resultText(b)
+		result, err := r.result(b)
 		if err != nil {
 			return nil, false, err
 		}
 
+		extra = extra || result.hasMedia()
+
 		results = append(results, deliveredResult{
 			id: b.ToolUseID,
 			result: toolResult{
-				Text:    text,
+				Text:    result.text(),
 				IsError: b.IsError,
 			},
 		})
@@ -620,73 +639,93 @@ func toolResults(messages []message) ([]deliveredResult, bool, error) {
 	return results, extra, nil
 }
 
+// contentText is a message's content as text, every attachment its placeholder.
 func contentText(raw json.RawMessage) (string, error) {
+	var r promptRenderer
+
+	content, err := r.content(raw)
+
+	return content.text(), err
+}
+
+// content renders a message's content, its non-empty blocks one per line.
+func (r *promptRenderer) content(raw json.RawMessage) (prompt, error) {
 	text, blocks, err := decodeContent(raw)
 	if err != nil || blocks == nil {
-		return text, err
+		return textPrompt(text), err
 	}
 
-	parts := make([]string, 0, len(blocks))
+	parts := make([]prompt, 0, len(blocks))
 
 	for _, b := range blocks {
-		part, err := blockText(b)
+		part, err := r.block(b)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 
-		if part != "" {
+		if len(part) > 0 {
 			parts = append(parts, part)
 		}
 	}
 
-	return strings.Join(parts, "\n"), nil
+	return joinLines(parts), nil
 }
 
-// blockText renders one block for the prompt; thinking and unknown blocks
-// carry nothing agy can use and render empty.
-func blockText(b contentBlock) (string, error) {
+// block renders one block for the prompt; thinking and unknown blocks carry
+// nothing agy can use and render empty.
+func (r *promptRenderer) block(b contentBlock) (prompt, error) {
+	var p prompt
+
 	switch b.Type {
 	case "text":
-		return b.Text, nil
+		p.addText(b.Text)
 	case "tool_use":
-		return "[tool_use " + b.Name + " " + string(compactJSON(b.Input)) + "]", nil
+		p.addText("[tool_use " + b.Name + " " + string(compactJSON(b.Input)) + "]")
 	case "tool_result":
-		text, err := resultText(b)
+		result, err := r.result(b)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 
-		return "[tool_result " + b.ToolUseID + "]\n" + text, nil
+		p.addText("[tool_result " + b.ToolUseID + "]\n")
+		p.add(result)
 	case "image":
-		return "[image omitted]", nil
+		p.add(r.image(b.Source))
+	case "document":
+		p.add(r.document(b))
 	}
 
-	return "", nil
+	return p, nil
 }
 
-func resultText(b contentBlock) (string, error) {
+// result renders a tool_result's content; its attachments follow in place.
+func (r *promptRenderer) result(b contentBlock) (prompt, error) {
 	text, blocks, err := decodeContent(b.Content)
 	if err != nil {
-		return "", fmt.Errorf("tool_result %s: %w", b.ToolUseID, err)
+		return nil, fmt.Errorf("tool_result %s: %w", b.ToolUseID, err)
 	}
 
 	if blocks == nil {
-		return text, nil
+		return textPrompt(text), nil
 	}
 
-	parts := make([]string, 0, len(blocks))
+	parts := make([]prompt, 0, len(blocks))
 
 	// A ToolSearch result is made of tool_reference blocks only.
 	for _, block := range blocks {
 		switch block.Type {
 		case "text":
-			parts = append(parts, block.Text)
+			parts = append(parts, textPrompt(block.Text))
 		case "tool_reference":
-			parts = append(parts, "tool_reference: "+block.ToolName)
+			parts = append(parts, textPrompt("tool_reference: "+block.ToolName))
+		case "image":
+			parts = append(parts, r.image(block.Source))
+		case "document":
+			parts = append(parts, r.document(block))
 		}
 	}
 
-	return strings.Join(parts, "\n"), nil
+	return joinLines(parts), nil
 }
 
 // decodeContent splits string content from block content; blocks is nil for

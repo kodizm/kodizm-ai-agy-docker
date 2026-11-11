@@ -1159,6 +1159,137 @@ func TestUnknownToolResultsReplayTheConversation(t *testing.T) {
 	}
 }
 
+var (
+	pngContent = map[string]any{
+		"type":   "image",
+		"source": map[string]string{"type": "base64", "media_type": "image/png", "data": "AAAA"},
+	}
+	pdfContent = map[string]any{
+		"type":   "document",
+		"title":  "spec",
+		"source": map[string]string{"type": "base64", "media_type": "application/pdf", "data": "JVBERi0="},
+	}
+)
+
+// agy gets an image or a PDF as an ACP block only when its initialize reply
+// advertised that content, in either of the protocol's shapes.
+func TestMediaReachesAgyAsPromptBlocks(t *testing.T) {
+	const (
+		text     = `{"type":"text","text":"SCRIPT:blocks\n"}`
+		resource = `{"type":"resource","resource":{"uri":"file:///attachments/spec-1.pdf",` +
+			`"mimeType":"application/pdf","blob":"JVBERi0="}}`
+	)
+
+	tests := []struct {
+		name         string
+		capabilities string
+		want         string
+	}{
+		{
+			name:         "v1 advertises both",
+			capabilities: `{"promptCapabilities":{"image":true,"embeddedContext":true}}`,
+			want:         `[` + text + `,` + pngBlock + `,{"type":"text","text":"\n"},` + resource + `]`,
+		},
+		{
+			name:         "v2 draft advertises images only",
+			capabilities: `{"prompt":{"image":{},"embeddedContext":null}}`,
+			want:         `[` + text + `,` + pngBlock + `,{"type":"text","text":"\n[document omitted]"}]`,
+		},
+		{
+			name: "nothing advertised",
+			want: `[{"type":"text","text":"SCRIPT:blocks\n[image omitted]\n[document omitted]"}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(fakeCapabilitiesEnv, tt.capabilities)
+			b := newBridge(t, nil)
+
+			messages := []map[string]any{{
+				"role":    "user",
+				"content": []any{map[string]string{"type": "text", "text": "SCRIPT:blocks"}, pngContent, pdfContent},
+			}}
+
+			got, _, stop, _ := b.turn(t, false, messages)
+			if stop != "end_turn" {
+				t.Fatalf("stop %q", stop)
+			}
+
+			assertSameJSON(t, got, tt.want)
+		})
+	}
+}
+
+// A held turn takes a tool's answer as text only, so an image the client read
+// through a tool ends it, and the conversation replays with the image inline
+// after the result's text.
+func TestToolResultImageReplaysTheConversationWithTheBlock(t *testing.T) {
+	t.Setenv(fakeCapabilitiesEnv, `{"promptCapabilities":{"image":true}}`)
+	logs := captureLog(t)
+	b := newBridge(t, nil)
+	first := userText("SCRIPT:tool")
+
+	text, calls, stop, _ := b.turn(t, false, first)
+	if stop != "tool_use" || len(calls) != 1 {
+		t.Fatalf("first response: stop %q, calls %+v", stop, calls)
+	}
+
+	// The result's text names the script, so the replay echoes what it got.
+	result := map[string]any{"role": "user", "content": []any{map[string]any{
+		"type":        "tool_result",
+		"tool_use_id": calls[0].id,
+		"content":     []any{map[string]string{"type": "text", "text": "SCRIPT:blocks"}, pngContent},
+	}}}
+
+	got, _, stop, _ := b.turn(t, false, append(first, assistantCalls(text, calls), result))
+	if stop != "end_turn" {
+		t.Fatalf("stop %q", stop)
+	}
+
+	history := "<conversation_history>\n[user]\nSCRIPT:tool\n\n[assistant]\nLet me look.\n" +
+		"[tool_use read_file {\"path\":\"a.txt\"}]\n</conversation_history>\n\n"
+	want, err := json.Marshal([]any{
+		map[string]string{"type": "text", "text": history + "[tool_result " + calls[0].id + "]\nSCRIPT:blocks\n"},
+		json.RawMessage(pngBlock),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertSameJSON(t, got, string(want))
+
+	if n := b.spawned(t); n != 2 {
+		t.Fatalf("agy started %d times, want 2: the held turn ends and a replay starts", n)
+	}
+
+	b.waitIdle(t)
+
+	if !strings.Contains(logs.String(), "orphan_results=1 ") {
+		t.Fatalf("the replay does not count the orphaned result:\n%s", logs.String())
+	}
+}
+
+// A result of text alone still resumes the held turn when agy takes images.
+func TestTextToolResultResumesWhenMediaIsAdvertised(t *testing.T) {
+	t.Setenv(fakeCapabilitiesEnv, `{"promptCapabilities":{"image":true,"embeddedContext":true}}`)
+	b := newBridge(t, nil)
+	first := userText("SCRIPT:tool")
+
+	text, calls, _, _ := b.turn(t, false, first)
+	messages := append(first, assistantCalls(text, calls), toolResultMessage(map[string]string{calls[0].id: "file body"}))
+
+	if got, _, stop, _ := b.turn(t, false, messages); got != "Tool said: file body" || stop != "end_turn" {
+		t.Fatalf("second response: text %q, stop %q", got, stop)
+	}
+
+	if n := b.spawned(t); n != 1 {
+		t.Fatalf("agy started %d times, want once for the whole turn", n)
+	}
+
+	b.waitIdle(t)
+}
+
 func TestUpstreamFailuresMapToAnthropicErrors(t *testing.T) {
 	tests := []struct {
 		script     string

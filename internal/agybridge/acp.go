@@ -200,6 +200,9 @@ type agent struct {
 	// search among them) or hands to the client.
 	onToolCall func()
 
+	// prompts is what agy takes in a prompt, read by initialize.
+	prompts promptCapabilities
+
 	killOnce sync.Once
 	killErr  error
 
@@ -377,6 +380,21 @@ func (a *agent) close() {
 	_ = a.cmd.Wait()
 
 	<-a.readDone
+}
+
+// initialize opens the ACP connection and keeps the prompt content agy
+// advertised, which is all a prompt may carry besides text.
+func (a *agent) initialize(ctx context.Context) error {
+	var result json.RawMessage
+
+	params := map[string]any{"protocolVersion": 1, "clientCapabilities": struct{}{}}
+	if err := a.call(ctx, "initialize", params, &result); err != nil {
+		return err
+	}
+
+	a.prompts = parsePromptCapabilities(result)
+
+	return nil
 }
 
 // call sends a request and waits for its response, decoding the result into

@@ -163,7 +163,7 @@ type sessionSpec struct {
 	model  string
 	level  string
 	system string
-	prompt string
+	prompt prompt
 	tools  []mcpTool
 	// groups are the quota groups of the model; affinity keys the
 	// conversation to the account it ran on before.
@@ -907,8 +907,7 @@ func (srv *Server) converse(s *session, spec sessionSpec) (turnEnd, error) {
 	setup, cancel := context.WithTimeout(s.ctx, setupTimeout)
 	defer cancel()
 
-	initialize := map[string]any{"protocolVersion": 1, "clientCapabilities": struct{}{}}
-	if err := a.call(setup, "initialize", initialize, nil); err != nil {
+	if err := a.initialize(setup); err != nil {
 		return turnEnd{}, err
 	}
 
@@ -921,14 +920,15 @@ func (srv *Server) converse(s *session, spec sessionSpec) (turnEnd, error) {
 		return turnEnd{}, err
 	}
 
-	// 4. Run the turn; text and tool calls reach the client while it runs.
-	prompt := map[string]any{
+	// 4. Run the turn; text and tool calls reach the client while it runs. The
+	// prompt carries only the attachments this agy advertised.
+	turn := map[string]any{
 		"sessionId": opened.SessionID,
-		"prompt":    []textContent{{Type: "text", Text: spec.prompt}},
+		"prompt":    spec.prompt.forAgent(a.prompts),
 	}
 
 	var result promptResult
-	if err := a.call(s.ctx, "session/prompt", prompt, &result); err != nil {
+	if err := a.call(s.ctx, "session/prompt", turn, &result); err != nil {
 		return turnEnd{}, err
 	}
 
