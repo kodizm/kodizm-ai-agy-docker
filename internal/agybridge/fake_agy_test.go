@@ -601,6 +601,9 @@ func (f *fakeAgy) callTool(args map[string]any) string {
 
 const fakeBannerDelay = 300 * time.Millisecond
 
+// fakeDripGap spaces the chunks of the drip script.
+const fakeDripGap = 100 * time.Millisecond
+
 var banners = map[string]string{
 	"429":          "⚠ API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Resource has been exhausted.",
 	"503":          "⚠ API error (attempt 1): UNAVAILABLE (code 503): The service is currently unavailable.",
@@ -795,6 +798,22 @@ func (f *fakeAgy) prompt(id json.RawMessage, prompt string) {
 	case "hang":
 		f.chunk("partial")
 		hang()
+	case "silent":
+		// agy retries a dead upstream without a word: no chunk, no tool call, no end.
+		hang()
+	case "toolsilent":
+		// The tool result arrives and agy goes quiet: the clock starts over at the resume.
+		f.chunk("Let me look.")
+		f.callTool(map[string]any{"path": "a.txt"})
+		hang()
+	case "drip":
+		// A slow model that keeps talking: each chunk is a sign of life.
+		for range 8 {
+			f.chunk(".")
+			time.Sleep(fakeDripGap)
+		}
+
+		f.end(id, "end_turn", 1, 1)
 	default:
 		f.chunk("unknown script " + script)
 		f.end(id, "end_turn", 0, 0)

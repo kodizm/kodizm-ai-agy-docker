@@ -101,6 +101,10 @@ type Config struct {
 	PendingTTL time.Duration
 	// SlotWait bounds the wait for a free slot before answering 529.
 	SlotWait time.Duration
+	// SilenceTimeout is how long agy may show no sign of life while a turn is
+	// working before the bridge kills it and answers 529. A parked turn waits
+	// for the client and is not counted. Zero or less has no watchdog.
+	SilenceTimeout time.Duration
 	// APIKey, when set, is required on every route.
 	APIKey string
 	// ScrubFile names an optional JSON array of extra scrub rules.
@@ -232,6 +236,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	}{
 		{key: "AGY_BRIDGE_PENDING_TTL", fallback: 300, target: &cfg.PendingTTL},
 		{key: "AGY_BRIDGE_SLOT_WAIT", fallback: 30, target: &cfg.SlotWait},
+		{key: "AGY_BRIDGE_SILENCE_TIMEOUT", fallback: 180, target: &cfg.SilenceTimeout},
 		{key: "AGY_BRIDGE_AFFINITY_TTL", fallback: 3600, target: &cfg.AffinityTTL},
 	}
 
@@ -786,6 +791,7 @@ func (srv *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		failure := asAPIError(err)
 		out.fail(failure)
+		rl.reason = failure.reason
 		rl.outcome = outcomeOf(failure)
 	default:
 		rl.outcome = end.stopReason

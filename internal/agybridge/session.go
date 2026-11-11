@@ -37,6 +37,9 @@ var (
 	// firstByteAfter is how long a stream may stay silent before its head
 	// goes out anyway.
 	firstByteAfter = 12 * time.Second
+
+	// minWatchTick floors how often the silence watchdog looks.
+	minWatchTick = 10 * time.Millisecond
 )
 
 var (
@@ -251,6 +254,11 @@ type session struct {
 	// cleanupFailed counts removals of agy's home that failed.
 	cleanupFailed atomic.Int64
 
+	// awake is when the turn last began working, as unix nanoseconds: the prompt
+	// going out, or a parked turn getting its tool results. agy owes no sign of
+	// life for the time before it, since it was waiting for the client.
+	awake atomic.Int64
+
 	// stderr holds the tail of agy's stderr, logged once agy is gone.
 	stderr tailBuffer
 
@@ -382,9 +390,64 @@ func (s *session) resumeFromPark() bool {
 	}
 
 	s.parked = false
+	s.awake.Store(time.Now().UnixNano())
 	s.stopExpiryLocked()
 
 	return true
+}
+
+// quiet is how long agy has shown no sign of life in the turn's working time.
+func (s *session) quiet(a *agent) time.Duration {
+	return time.Since(time.Unix(0, max(a.activity.Load(), s.awake.Load())))
+}
+
+// reasonAgySilent is the request log's reason for a turn the silence watchdog ended.
+const reasonAgySilent = "agy_silent"
+
+// watch ends a turn agy has gone silent on. agy retries a dead upstream for minutes without a word and, until
+// then, the request holds its slots; when agy shows no sign of life for silence while the turn is working (a
+// parked turn waits for the client, not for agy), agy is killed and the request fails with a 529: a stream whose
+// head has gone out already gets it as an error event, and the gateway cannot fail over from there. The account
+// is neither penalised nor credited, since a hang follows the model and not the login. The returned func stops
+// the watch and waits for it.
+func (s *session) watch(a *agent, silence time.Duration) (stop func()) {
+	done := make(chan struct{})
+	finished := make(chan struct{})
+
+	go func() {
+		defer close(finished)
+
+		tick := time.NewTicker(max(silence/4, minWatchTick))
+		defer tick.Stop()
+
+		for {
+			select {
+			case <-tick.C:
+			case <-done:
+				return
+			case <-s.ctx.Done():
+				return
+			}
+
+			if s.isParked() || s.quiet(a) < silence {
+				continue
+			}
+
+			log.Printf("session %s: agy showed no sign of life for %s; killed", s.tag, silence.Round(time.Second))
+			s.events.push(event{
+				kind: eventFailed,
+				err:  refused(reasonAgySilent, "agy produced nothing for "+silence.Round(time.Second).String()),
+			})
+			s.cancel()
+
+			return
+		}
+	}()
+
+	return func() {
+		close(done)
+		<-finished
+	}
 }
 
 // evictIfParked cancels the turn only while it is parked: a turn agy is working
@@ -925,6 +988,12 @@ func (srv *Server) converse(s *session, spec sessionSpec) (turnEnd, error) {
 	turn := map[string]any{
 		"sessionId": opened.SessionID,
 		"prompt":    spec.prompt.forAgent(a.prompts),
+	}
+
+	s.awake.Store(time.Now().UnixNano())
+
+	if srv.cfg.SilenceTimeout > 0 {
+		defer s.watch(a, srv.cfg.SilenceTimeout)()
 	}
 
 	var result promptResult
