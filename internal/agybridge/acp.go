@@ -203,6 +203,11 @@ type agent struct {
 	// prompts is what agy takes in a prompt, read by initialize.
 	prompts promptCapabilities
 
+	// activity is when agy last showed a sign of life, as unix nanoseconds: a
+	// message or thought chunk, a tool call or an update to one, or a request
+	// of its own. A command list or a plan says nothing about the turn.
+	activity atomic.Int64
+
 	killOnce sync.Once
 	killErr  error
 
@@ -522,7 +527,13 @@ func (a *agent) deny(m rpcMessage) {
 		return
 	}
 
+	a.touch()
 	a.onDenied(m.Method)
+}
+
+// touch notes a sign of life.
+func (a *agent) touch() {
+	a.activity.Store(time.Now().UnixNano())
 }
 
 func (a *agent) update(params json.RawMessage) {
@@ -539,6 +550,11 @@ func (a *agent) update(params json.RawMessage) {
 		log.Printf("agy session/update: %v", err)
 
 		return
+	}
+
+	switch p.Update.SessionUpdate {
+	case "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update":
+		a.touch()
 	}
 
 	switch {

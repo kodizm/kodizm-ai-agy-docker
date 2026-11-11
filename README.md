@@ -22,11 +22,13 @@ The conversation reaches agy as one ACP prompt. Images (base64 JPEG, PNG, GIF or
 
 agy reads about 192,000 bytes of one prompt and drops the rest from the end without an error, so a replayed conversation would lose its newest messages. The text of a replay is therefore kept within `AGY_BRIDGE_MAX_PROMPT_BYTES` (default 180000). Over it, the oldest large tool results and tool arguments are cut to their head and tail around a marker, then to the marker alone; only after that is the text of older messages cut to its head and tail (500 bytes each). The prompt then opens with a note saying so, and the newest user text is never cut. A replay that still does not fit answers `400 invalid_request_error` with `prompt is too long: N bytes > M maximum ...`, before any agy process starts. A resumed turn replays nothing and is not measured. The request line logs `prompt_bytes` and `shrunk`.
 
+agy retries a dead upstream for minutes without a word, and until then the request holds its slots. When agy shows no sign of life (a message or thought chunk, a tool call or an update to one, a request of its own) for `AGY_BRIDGE_SILENCE_TIMEOUT` seconds (default 180), the bridge kills it and answers `529 overloaded_error` (a stream whose head has gone out gets it as an `error` event, since a status can no longer be sent), logged as `reason=agy_silent`. The account is not penalised for it. A turn parked on tool results waits for the client and is not counted; its clock restarts when the results arrive.
+
 Without pushed accounts, requests get `503 no agy account available`. For local development, `AGY_BRIDGE_TOKEN_FILE` points at one agy token file instead (the admin routes then answer `409`).
 
 ## Settings
 
-`AGY_BRIDGE_LISTEN` (`0.0.0.0:3457` in the image), `AGY_BRIDGE_API_KEY`, `AGY_BIN`, `AGY_BRIDGE_HOMES`, `AGY_BRIDGE_MODELS`, `AGY_BRIDGE_DEFAULT_MODEL`, `AGY_BRIDGE_CLEAN`, `AGY_BRIDGE_WEB`, `AGY_BRIDGE_SCRUB_FILE`, `AGY_BRIDGE_MAX_CONCURRENT`, `AGY_BRIDGE_PER_ACCOUNT`, `AGY_BRIDGE_MAX_PARKED`, `AGY_BRIDGE_MAX_PROMPT_BYTES`, `AGY_BRIDGE_PENDING_TTL`, `AGY_BRIDGE_SLOT_WAIT`, `AGY_BRIDGE_AFFINITY_TTL`, `AGY_BRIDGE_USAGE_INTERVAL`, `AGY_BRIDGE_TOKEN_FILE`. Defaults and meaning are in `cmd/agy-bridge/main.go` and `internal/agybridge/server.go`.
+`AGY_BRIDGE_LISTEN` (`0.0.0.0:3457` in the image), `AGY_BRIDGE_API_KEY`, `AGY_BIN`, `AGY_BRIDGE_HOMES`, `AGY_BRIDGE_MODELS`, `AGY_BRIDGE_DEFAULT_MODEL`, `AGY_BRIDGE_CLEAN`, `AGY_BRIDGE_WEB`, `AGY_BRIDGE_SCRUB_FILE`, `AGY_BRIDGE_MAX_CONCURRENT`, `AGY_BRIDGE_PER_ACCOUNT`, `AGY_BRIDGE_MAX_PARKED`, `AGY_BRIDGE_MAX_PROMPT_BYTES`, `AGY_BRIDGE_PENDING_TTL`, `AGY_BRIDGE_SLOT_WAIT`, `AGY_BRIDGE_SILENCE_TIMEOUT`, `AGY_BRIDGE_AFFINITY_TTL`, `AGY_BRIDGE_USAGE_INTERVAL`, `AGY_BRIDGE_TOKEN_FILE`. Defaults and meaning are in `cmd/agy-bridge/main.go` and `internal/agybridge/server.go`.
 
 ## Build and test
 
