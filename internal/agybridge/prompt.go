@@ -241,9 +241,11 @@ type mediaSource struct {
 var imageTypes = []string{"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 // promptRenderer renders a conversation; it numbers the PDFs in order, so a
-// renderer serves one conversation.
+// renderer serves one conversation. Its cuts shorten the content it renders
+// next; the zero value shortens nothing.
 type promptRenderer struct {
 	documents int
+	cuts      cuts
 }
 
 // image is an image block from a base64 source of a known type, or the
@@ -281,7 +283,7 @@ func (r *promptRenderer) document(b contentBlock) prompt {
 
 	switch {
 	case source.Type == "text" && mediaType == "text/plain":
-		return textPrompt(source.Data)
+		return textPrompt(r.cuts[kindText].apply(source.Data))
 	case source.Type == "base64" && mediaType == "application/pdf" && isBase64(source.Data):
 		r.documents++
 

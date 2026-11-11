@@ -206,20 +206,44 @@ type deliveredResult struct {
 // earlier messages become a history section, the last one follows, and each
 // attachment stays where it occurred.
 func renderPrompt(messages []message) (prompt, error) {
+	return renderCut(messages, nil)
+}
+
+// renderCut renders like renderPrompt with plan[i] shortening the content of message i. A nil plan shortens
+// nothing; any other plan opens the prompt with the omission note.
+func renderCut(messages []message, plan []cuts) (prompt, error) {
 	var r promptRenderer
+
+	content := func(i int) (prompt, error) {
+		if plan != nil {
+			r.cuts = plan[i]
+		}
+
+		return r.content(messages[i].Content)
+	}
+
+	parts := make([]prompt, 0, 3*len(messages)+3)
+
+	if plan != nil {
+		parts = append(parts, textPrompt(omissionNote+"\n\n"))
+	}
 
 	switch len(messages) {
 	case 0:
 		return nil, nil
 	case 1:
-		return r.content(messages[0].Content)
+		only, err := content(0)
+		if err != nil {
+			return nil, err
+		}
+
+		return concat(append(parts, only)), nil
 	}
 
-	parts := make([]prompt, 0, 3*len(messages)+2)
 	parts = append(parts, textPrompt("<conversation_history>\n"))
 
 	for i, m := range messages[:len(messages)-1] {
-		content, err := r.content(m.Content)
+		earlier, err := content(i)
 		if err != nil {
 			return nil, err
 		}
@@ -228,10 +252,10 @@ func renderPrompt(messages []message) (prompt, error) {
 			parts = append(parts, textPrompt("\n\n"))
 		}
 
-		parts = append(parts, textPrompt("["+m.Role+"]\n"), content)
+		parts = append(parts, textPrompt("["+m.Role+"]\n"), earlier)
 	}
 
-	last, err := r.content(messages[len(messages)-1].Content)
+	last, err := content(len(messages) - 1)
 	if err != nil {
 		return nil, err
 	}
@@ -653,7 +677,7 @@ func contentText(raw json.RawMessage) (string, error) {
 func (r *promptRenderer) content(raw json.RawMessage) (prompt, error) {
 	text, blocks, err := decodeContent(raw)
 	if err != nil || blocks == nil {
-		return textPrompt(text), err
+		return textPrompt(r.cuts[kindText].apply(text)), err
 	}
 
 	parts := make([]prompt, 0, len(blocks))
@@ -679,9 +703,9 @@ func (r *promptRenderer) block(b contentBlock) (prompt, error) {
 
 	switch b.Type {
 	case "text":
-		p.addText(b.Text)
+		p.addText(r.cuts[kindText].apply(b.Text))
 	case "tool_use":
-		p.addText("[tool_use " + b.Name + " " + string(compactJSON(b.Input)) + "]")
+		p.addText("[tool_use " + b.Name + " " + r.cuts[kindUse].applyJSON(b.Input) + "]")
 	case "tool_result":
 		result, err := r.result(b)
 		if err != nil {
@@ -707,7 +731,7 @@ func (r *promptRenderer) result(b contentBlock) (prompt, error) {
 	}
 
 	if blocks == nil {
-		return textPrompt(text), nil
+		return textPrompt(r.cuts[kindResult].apply(text)), nil
 	}
 
 	parts := make([]prompt, 0, len(blocks))
@@ -716,7 +740,7 @@ func (r *promptRenderer) result(b contentBlock) (prompt, error) {
 	for _, block := range blocks {
 		switch block.Type {
 		case "text":
-			parts = append(parts, textPrompt(block.Text))
+			parts = append(parts, textPrompt(r.cuts[kindResult].apply(block.Text)))
 		case "tool_reference":
 			parts = append(parts, textPrompt("tool_reference: "+block.ToolName))
 		case "image":
