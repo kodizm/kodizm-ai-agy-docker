@@ -18,6 +18,8 @@ Kodizm provisions the container on its Docker host, then **connects to the bridg
 
 Every agy process runs in its own throwaway `HOME` with one account's access-only login. Which account serves a request is chosen from the conversation prefix (prompt cache reuse), then remaining quota, then least recent use; quota, rate and capacity failures cool an account per model group. Every `/v1/messages` response an agy session produced carries `X-Kodizm-Account: <account id>` (the id Kodizm pushed, never the email or a token); a response with no session, such as `503 no agy account available`, does not.
 
+The conversation reaches agy as one ACP prompt. Images (base64 JPEG, PNG, GIF or WebP) and PDFs (base64) are forwarded as ACP image and embedded resource blocks where they occurred, also inside tool results, but only when agy advertises image or embedded context support at `initialize`; otherwise, and for url or file sources, they become `[image omitted]` or `[document omitted]`. A plain text document is forwarded as text. The bridge never fetches a url.
+
 Without pushed accounts, requests get `503 no agy account available`. For local development, `AGY_BRIDGE_TOKEN_FILE` points at one agy token file instead (the admin routes then answer `409`).
 
 ## Settings

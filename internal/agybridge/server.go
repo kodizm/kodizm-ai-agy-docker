@@ -851,14 +851,14 @@ func (srv *Server) openTurn(ctx context.Context, req *messagesRequest, rl *reque
 		return nil, invalidRequest(err.Error())
 	}
 
-	prompt, err := renderPrompt(req.Messages)
+	rendered, err := renderPrompt(req.Messages)
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
 
 	model := srv.modelFor(req.Model)
 	spec := sessionSpec{
-		prompt:    prompt,
+		prompt:    rendered,
 		tools:     tools,
 		groups:    quotaGroups(model.id),
 		affinity:  affinityKey(system, tools, req.Messages),

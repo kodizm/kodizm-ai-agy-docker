@@ -2,6 +2,7 @@ package agybridge
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -37,6 +38,10 @@ const (
 
 	// fakeLoginSilentEnv makes `agy acp --login` print nothing and hang.
 	fakeLoginSilentEnv = "FAKE_AGY_LOGIN_SILENT"
+
+	// fakeCapabilitiesEnv is the agentCapabilities object the fake answers
+	// initialize with, {} when unset.
+	fakeCapabilitiesEnv = "FAKE_AGY_CAPABILITIES"
 
 	fakeLoginURL   = "https://accounts.google.com/o/oauth2/auth?client_id=fake&state=fake"
 	fakeLoginCode  = "good-code"
@@ -347,6 +352,9 @@ type fakeAgy struct {
 	// agentFile is what the fake found in the workspace when session/new
 	// arrived, which is when the real agy discovers its custom agents.
 	agentFile fakeAgentFile
+
+	// blocks is the session/prompt content as the bridge sent it.
+	blocks json.RawMessage
 }
 
 // fakeAgentFile describes the clean agent file as agy would find it.
@@ -428,7 +436,15 @@ func (f *fakeAgy) handle(m rpcMessage) {
 			return
 		}
 
-		f.bridge.respond(m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{}})
+		// A reply without any result key, which JSON-RPC forbids but a bridge must survive.
+		if os.Getenv(fakeCapabilitiesEnv) == "NO_RESULT" {
+			f.bridge.send(map[string]any{"jsonrpc": "2.0", "id": m.ID})
+
+			return
+		}
+
+		capabilities := json.RawMessage(cmp.Or(os.Getenv(fakeCapabilitiesEnv), "{}"))
+		f.bridge.respond(m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": capabilities})
 	case "session/new":
 		var p newSessionParams
 		_ = json.Unmarshal(m.Params, &p)
@@ -473,13 +489,29 @@ func (f *fakeAgy) handle(m rpcMessage) {
 		f.bridge.respond(m.ID, map[string]any{})
 	case "session/prompt":
 		var p struct {
-			Prompt []textContent `json:"prompt"`
+			Prompt json.RawMessage `json:"prompt"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
 
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(p.Prompt, &blocks)
+
+		// Scripts read the prompt's text; media blocks only split it.
+		var text strings.Builder
+		for _, block := range blocks {
+			if block.Type == "text" {
+				text.WriteString(block.Text)
+			}
+		}
+
+		f.blocks = p.Prompt
+
 		// The prompt runs beside the read loop so answers to the fake's own
 		// requests (permission, nothing else) still arrive.
-		go f.prompt(m.ID, p.Prompt[0].Text)
+		go f.prompt(m.ID, text.String())
 	default:
 		if hasID(m.ID) {
 			f.bridge.respond(m.ID, map[string]any{})
@@ -692,6 +724,9 @@ func (f *fakeAgy) prompt(id json.RawMessage, prompt string) {
 		f.end(id, "end_turn", 1, 1)
 	case "prompt":
 		f.chunk(prompt)
+		f.end(id, "end_turn", 1, 1)
+	case "blocks":
+		f.chunk(string(f.blocks))
 		f.end(id, "end_turn", 1, 1)
 	case "launch":
 		f.chunkJSON(map[string]any{

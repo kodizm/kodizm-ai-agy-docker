@@ -2,6 +2,7 @@ package agybridge
 
 import (
 	"encoding/json"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,9 +26,13 @@ func TestRenderPrompt(t *testing.T) {
 			want:     "A\nB",
 		},
 		{
-			name: "history with tools, images and thinking",
+			name: "history with tools, images, documents and thinking",
 			messages: `[
-				{"role": "user", "content": [{"type": "text", "text": "Read it"}, {"type": "image", "source": {}}]},
+				{"role": "user", "content": [
+					{"type": "text", "text": "Read it"},
+					{"type": "image", "source": {}},
+					{"type": "document", "source": {"type": "url", "url": "https://example.test/a.pdf"}}
+				]},
 				{"role": "assistant", "content": [
 					{"type": "thinking", "thinking": "hmm"},
 					{"type": "text", "text": "Sure."},
@@ -40,7 +45,7 @@ func TestRenderPrompt(t *testing.T) {
 				{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_2", "content": "x y"}]}
 			]`,
 			want: "<conversation_history>\n" +
-				"[user]\nRead it\n[image omitted]\n\n" +
+				"[user]\nRead it\n[image omitted]\n[document omitted]\n\n" +
 				"[assistant]\nSure.\n[tool_use read_file {\"path\":\"a.txt\"}]\n\n" +
 				"[user]\n[tool_result toolu_1]\nbody\n\n" +
 				"[assistant]\n[tool_use ls {}]\n" +
@@ -61,10 +66,169 @@ func TestRenderPrompt(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if got != tt.want {
-				t.Fatalf("renderPrompt =\n%q\nwant\n%q", got, tt.want)
+			if got.text() != tt.want {
+				t.Fatalf("renderPrompt =\n%q\nwant\n%q", got.text(), tt.want)
 			}
 		})
+	}
+}
+
+const (
+	pngSource = `{"type": "base64", "media_type": "image/png", "data": "AAAA"}`
+	pdfSource = `{"type": "base64", "media_type": "application/pdf", "data": "JVBERi0="}`
+	pngBlock  = `{"type":"image","mimeType":"image/png","data":"AAAA"}`
+)
+
+func TestRenderPromptBlocks(t *testing.T) {
+	all := promptCapabilities{image: true, embeddedContext: true}
+	look := `[{"role": "user", "content": [
+		{"type": "text", "text": "Look"},
+		{"type": "image", "source": ` + pngSource + `},
+		{"type": "text", "text": "there"}
+	]}]`
+	single := func(blocks ...string) string {
+		return `[{"role": "user", "content": [` + strings.Join(blocks, ",") + `]}]`
+	}
+
+	tests := []struct {
+		name         string
+		messages     string
+		capabilities promptCapabilities
+		want         string
+	}{
+		{
+			name:         "an advertised image sits where it occurred",
+			messages:     look,
+			capabilities: all,
+			want:         `[{"type":"text","text":"Look\n"},` + pngBlock + `,{"type":"text","text":"\nthere"}]`,
+		},
+		{
+			name:     "an image agy did not advertise is a placeholder",
+			messages: look,
+			want:     `[{"type":"text","text":"Look\n[image omitted]\nthere"}]`,
+		},
+		{
+			name:         "image/jpg is image/jpeg",
+			messages:     single(`{"type": "image", "source": {"type": "base64", "media_type": "image/jpg", "data": "AAAA"}}`),
+			capabilities: all,
+			want:         `[{"type":"image","mimeType":"image/jpeg","data":"AAAA"}]`,
+		},
+		{
+			name:         "a url image is never fetched",
+			messages:     single(`{"type": "image", "source": {"type": "url", "url": "https://example.test/a.png"}}`),
+			capabilities: all,
+			want:         `[{"type":"text","text":"[image omitted]"}]`,
+		},
+		{
+			name:         "data that is not base64 is a placeholder",
+			messages:     single(`{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "no base64!"}}`),
+			capabilities: all,
+			want:         `[{"type":"text","text":"[image omitted]"}]`,
+		},
+		{
+			name:         "empty data is a placeholder",
+			messages:     single(`{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ""}}`),
+			capabilities: all,
+			want:         `[{"type":"text","text":"[image omitted]"}]`,
+		},
+		{
+			name:         "an unsupported image type is a placeholder",
+			messages:     single(`{"type": "image", "source": {"type": "base64", "media_type": "image/bmp", "data": "AAAA"}}`),
+			capabilities: all,
+			want:         `[{"type":"text","text":"[image omitted]"}]`,
+		},
+		{
+			name: "pdfs are resources named by a sanitised title and their number",
+			messages: single(
+				`{"type": "document", "title": "../My Report (v2)", "source": `+pdfSource+`}`,
+				`{"type": "document", "source": `+pdfSource+`}`,
+			),
+			capabilities: all,
+			want: `[{"type":"resource","resource":{"uri":"file:///attachments/.._My_Report__v2_-1.pdf",` +
+				`"mimeType":"application/pdf","blob":"JVBERi0="}},{"type":"text","text":"\n"},` +
+				`{"type":"resource","resource":{"uri":"file:///attachments/document-2.pdf",` +
+				`"mimeType":"application/pdf","blob":"JVBERi0="}}]`,
+		},
+		{
+			name:         "a pdf without embedded context is a placeholder",
+			messages:     single(`{"type": "document", "source": ` + pdfSource + `}`),
+			capabilities: promptCapabilities{image: true},
+			want:         `[{"type":"text","text":"[document omitted]"}]`,
+		},
+		{
+			name: "a text document is text",
+			messages: single(
+				`{"type": "text", "text": "Read:"}`,
+				`{"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "plain body"}}`,
+			),
+			want: `[{"type":"text","text":"Read:\nplain body"}]`,
+		},
+		{
+			name:         "a url document is a placeholder",
+			messages:     single(`{"type": "document", "source": {"type": "url", "url": "https://example.test/a.pdf"}}`),
+			capabilities: all,
+			want:         `[{"type":"text","text":"[document omitted]"}]`,
+		},
+		{
+			name: "the history keeps each attachment in order",
+			messages: `[
+				{"role": "user", "content": [{"type": "text", "text": "see"}, {"type": "image", "source": ` + pngSource + `}]},
+				{"role": "assistant", "content": "ok"},
+				{"role": "user", "content": "next"}
+			]`,
+			capabilities: all,
+			want: `[{"type":"text","text":"<conversation_history>\n[user]\nsee\n"},` + pngBlock + `,` +
+				`{"type":"text","text":"\n\n[assistant]\nok\n</conversation_history>\n\nnext"}]`,
+		},
+		{
+			name: "media in a tool result follows its text",
+			messages: single(`{"type": "tool_result", "tool_use_id": "t1", "content": [
+				{"type": "text", "text": "shot"},
+				{"type": "image", "source": ` + pngSource + `}
+			]}`),
+			capabilities: all,
+			want:         `[{"type":"text","text":"[tool_result t1]\nshot\n"},` + pngBlock + `]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var messages []message
+			if err := json.Unmarshal([]byte(tt.messages), &messages); err != nil {
+				t.Fatal(err)
+			}
+
+			rendered, err := renderPrompt(messages)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := json.Marshal(rendered.forAgent(tt.capabilities))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			assertSameJSON(t, string(got), tt.want)
+		})
+	}
+}
+
+// assertSameJSON compares two JSON documents by value, so escaping does not matter.
+func assertSameJSON(t *testing.T, got, want string) {
+	t.Helper()
+
+	var gotValue, wantValue any
+
+	if err := json.Unmarshal([]byte(got), &gotValue); err != nil {
+		t.Fatalf("got is not JSON: %v\n%s", err, got)
+	}
+
+	if err := json.Unmarshal([]byte(want), &wantValue); err != nil {
+		t.Fatalf("want is not JSON: %v\n%s", err, want)
+	}
+
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Fatalf("got\n%s\nwant\n%s", got, want)
 	}
 }
 
@@ -81,13 +245,15 @@ func TestToolReferenceBlocksRender(t *testing.T) {
 		]`),
 	}
 
-	got, err := resultText(block)
+	var r promptRenderer
+
+	got, err := r.result(block)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if want := "Found:\ntool_reference: WebFetch\ntool_reference: WebSearch"; got != want {
-		t.Fatalf("resultText = %q, want %q", got, want)
+	if want := "Found:\ntool_reference: WebFetch\n[image omitted]\ntool_reference: WebSearch"; got.text() != want {
+		t.Fatalf("result = %q, want %q", got.text(), want)
 	}
 
 	messages := []message{{Role: "user", Content: json.RawMessage(`[{"type": "tool_result", "tool_use_id": "toolu_1",
@@ -598,6 +764,27 @@ func TestToolResultsExtraContent(t *testing.T) {
 			content: `[{"type": "tool_result", "tool_use_id": "a"}, {"type": "image", "source": {}}]`,
 			extra:   true,
 		},
+		{
+			// A held turn takes text only, so the image has to ride a replayed prompt.
+			name: "an image inside a result",
+			content: `[{"type": "tool_result", "tool_use_id": "a", "content": [
+				{"type": "text", "text": "shot"}, {"type": "image", "source": ` + pngSource + `}
+			]}]`,
+			extra: true,
+		},
+		{
+			name:    "a pdf inside a result",
+			content: `[{"type": "tool_result", "tool_use_id": "a", "content": [{"type": "document", "source": ` + pdfSource + `}]}]`,
+			extra:   true,
+		},
+		{
+			// Nothing a replay could forward: the held turn reads the text and the placeholder.
+			name: "a text document and a url image inside a result",
+			content: `[{"type": "tool_result", "tool_use_id": "a", "content": [
+				{"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "body"}},
+				{"type": "image", "source": {"type": "url", "url": "https://example.test/a.png"}}
+			]}]`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -614,4 +801,45 @@ func TestToolResultsExtraContent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConcatMergesNeighbouringTextAndKeepsMedia(t *testing.T) {
+	image := promptBlock{Type: "image", MimeType: "image/png", Data: "AAAA"}
+	parts := []prompt{
+		textPrompt("a"),
+		textPrompt("b"),
+		{image},
+		textPrompt("c"),
+		nil,
+		textPrompt("d"),
+		{image},
+	}
+
+	var want prompt
+	for _, part := range parts {
+		want.add(part)
+	}
+
+	got := concat(parts)
+
+	assertSameJSON(t, mustJSON(t, got), mustJSON(t, want))
+
+	if len(got) != 4 || got[0].Text != "ab" || got[2].Text != "cd" {
+		t.Fatalf("concat = %+v, want text(ab) image text(cd) image", got)
+	}
+
+	if len(concat(nil)) != 0 {
+		t.Fatalf("concat(nil) must be empty")
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(raw)
 }

@@ -200,6 +200,9 @@ type agent struct {
 	// search among them) or hands to the client.
 	onToolCall func()
 
+	// prompts is what agy takes in a prompt, read by initialize.
+	prompts promptCapabilities
+
 	killOnce sync.Once
 	killErr  error
 
@@ -379,9 +382,44 @@ func (a *agent) close() {
 	<-a.readDone
 }
 
+// initialize opens the ACP connection and keeps the prompt content agy
+// advertised, which is all a prompt may carry besides text.
+func (a *agent) initialize(ctx context.Context) error {
+	params := map[string]any{"protocolVersion": 1, "clientCapabilities": struct{}{}}
+
+	// A reply with no result advertises nothing; it is not a failure.
+	result, err := a.request(ctx, "initialize", params)
+	if err != nil {
+		return err
+	}
+
+	a.prompts = parsePromptCapabilities(result)
+
+	return nil
+}
+
 // call sends a request and waits for its response, decoding the result into
 // result when it is not nil.
 func (a *agent) call(ctx context.Context, method string, params, result any) error {
+	raw, err := a.request(ctx, method, params)
+	if err != nil {
+		return err
+	}
+
+	if result == nil {
+		return nil
+	}
+
+	if err := json.Unmarshal(raw, result); err != nil {
+		return fmt.Errorf("%s result: %w", method, err)
+	}
+
+	return nil
+}
+
+// request sends a request and returns the raw result of its response, empty
+// when the response carried none.
+func (a *agent) request(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	id := a.nextID.Add(1)
 	reply := make(chan rpcMessage, 1)
 
@@ -396,7 +434,7 @@ func (a *agent) call(ctx context.Context, method string, params, result any) err
 	}()
 
 	if err := a.send(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}); err != nil {
-		return fmt.Errorf("%s: %w", method, err)
+		return nil, fmt.Errorf("%s: %w", method, err)
 	}
 
 	var m rpcMessage
@@ -407,25 +445,17 @@ func (a *agent) call(ctx context.Context, method string, params, result any) err
 		select {
 		case m = <-reply:
 		default:
-			return fmt.Errorf("%s: agy exited", method)
+			return nil, fmt.Errorf("%s: agy exited", method)
 		}
 	case <-ctx.Done():
-		return fmt.Errorf("%s: %w", method, ctx.Err())
+		return nil, fmt.Errorf("%s: %w", method, ctx.Err())
 	}
 
 	if m.Error != nil {
-		return fmt.Errorf("%s: %w", method, m.Error)
+		return nil, fmt.Errorf("%s: %w", method, m.Error)
 	}
 
-	if result == nil {
-		return nil
-	}
-
-	if err := json.Unmarshal(m.Result, result); err != nil {
-		return fmt.Errorf("%s result: %w", method, err)
-	}
-
-	return nil
+	return m.Result, nil
 }
 
 func (a *agent) send(v any) error {
