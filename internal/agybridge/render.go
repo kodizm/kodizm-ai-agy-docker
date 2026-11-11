@@ -136,12 +136,14 @@ func blocksImageBytes(blocks []contentBlock) int {
 
 	for _, b := range blocks {
 		switch b.Type {
-		case "image":
+		case "image", "document":
 			var source struct {
+				Type string `json:"type"`
 				Data string `json:"data"`
 			}
 
-			if json.Unmarshal(b.Source, &source) == nil {
+			// A text-source document is text agy reads; only base64 is payload.
+			if json.Unmarshal(b.Source, &source) == nil && (b.Type == "image" || source.Type == "base64") {
 				total += len(source.Data)
 			}
 		case "tool_result":
@@ -213,7 +215,8 @@ func renderPrompt(messages []message) (prompt, error) {
 		return r.content(messages[0].Content)
 	}
 
-	p := textPrompt("<conversation_history>\n")
+	parts := make([]prompt, 0, 3*len(messages)+2)
+	parts = append(parts, textPrompt("<conversation_history>\n"))
 
 	for i, m := range messages[:len(messages)-1] {
 		content, err := r.content(m.Content)
@@ -222,11 +225,10 @@ func renderPrompt(messages []message) (prompt, error) {
 		}
 
 		if i > 0 {
-			p.addText("\n\n")
+			parts = append(parts, textPrompt("\n\n"))
 		}
 
-		p.addText("[" + m.Role + "]\n")
-		p.add(content)
+		parts = append(parts, textPrompt("["+m.Role+"]\n"), content)
 	}
 
 	last, err := r.content(messages[len(messages)-1].Content)
@@ -234,10 +236,9 @@ func renderPrompt(messages []message) (prompt, error) {
 		return nil, err
 	}
 
-	p.addText("\n</conversation_history>\n\n")
-	p.add(last)
+	parts = append(parts, textPrompt("\n</conversation_history>\n\n"), last)
 
-	return p, nil
+	return concat(parts), nil
 }
 
 // systemText joins the text of a system field given as a string or blocks.

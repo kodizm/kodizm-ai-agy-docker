@@ -436,6 +436,13 @@ func (f *fakeAgy) handle(m rpcMessage) {
 			return
 		}
 
+		// A reply without any result key, which JSON-RPC forbids but a bridge must survive.
+		if os.Getenv(fakeCapabilitiesEnv) == "NO_RESULT" {
+			f.bridge.send(map[string]any{"jsonrpc": "2.0", "id": m.ID})
+
+			return
+		}
+
 		capabilities := json.RawMessage(cmp.Or(os.Getenv(fakeCapabilitiesEnv), "{}"))
 		f.bridge.respond(m.ID, map[string]any{"protocolVersion": 1, "agentCapabilities": capabilities})
 	case "session/new":

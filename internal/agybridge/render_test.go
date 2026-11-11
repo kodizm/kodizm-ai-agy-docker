@@ -802,3 +802,44 @@ func TestToolResultsExtraContent(t *testing.T) {
 		})
 	}
 }
+
+func TestConcatMergesNeighbouringTextAndKeepsMedia(t *testing.T) {
+	image := promptBlock{Type: "image", MimeType: "image/png", Data: "AAAA"}
+	parts := []prompt{
+		textPrompt("a"),
+		textPrompt("b"),
+		{image},
+		textPrompt("c"),
+		nil,
+		textPrompt("d"),
+		{image},
+	}
+
+	var want prompt
+	for _, part := range parts {
+		want.add(part)
+	}
+
+	got := concat(parts)
+
+	assertSameJSON(t, mustJSON(t, got), mustJSON(t, want))
+
+	if len(got) != 4 || got[0].Text != "ab" || got[2].Text != "cd" {
+		t.Fatalf("concat = %+v, want text(ab) image text(cd) image", got)
+	}
+
+	if len(concat(nil)) != 0 {
+		t.Fatalf("concat(nil) must be empty")
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(raw)
+}

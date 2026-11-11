@@ -771,12 +771,14 @@ func TestImageBytesCountsImagesInMessagesAndToolResults(t *testing.T) {
 				{"type":"text","text":"shot"}
 			]},
 			{"type":"tool_result","tool_use_id":"t2","content":"text only"},
-			{"type":"image","source":"not an object"}
+			{"type":"image","source":"not an object"},
+			{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"DDDDDDDD"}},
+			{"type":"document","source":{"type":"text","media_type":"text/plain","data":"kept as text"}}
 		]`)},
 	}
 
-	if got := imageBytes(messages); got != 12 {
-		t.Fatalf("imageBytes = %d, want 12 (8 + 4)", got)
+	if got := imageBytes(messages); got != 20 {
+		t.Fatalf("imageBytes = %d, want 20 (8 + 4 + 8, a text-source document is text)", got)
 	}
 }
 
@@ -1198,6 +1200,11 @@ func TestMediaReachesAgyAsPromptBlocks(t *testing.T) {
 		{
 			name: "nothing advertised",
 			want: `[{"type":"text","text":"SCRIPT:blocks\n[image omitted]\n[document omitted]"}]`,
+		},
+		{
+			name:         "an initialize reply with no result advertises nothing",
+			capabilities: "NO_RESULT",
+			want:         `[{"type":"text","text":"SCRIPT:blocks\n[image omitted]\n[document omitted]"}]`,
 		},
 	}
 

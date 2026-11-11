@@ -140,6 +140,40 @@ func (p *prompt) add(other prompt) {
 	}
 }
 
+// concat appends the parts into one prompt, merging neighbouring text. Text goes
+// through a builder, because a replayed history is hundreds of pieces and
+// addText copies the whole block on every call.
+func concat(parts []prompt) prompt {
+	var (
+		out  prompt
+		text strings.Builder
+	)
+
+	flush := func() {
+		if text.Len() > 0 {
+			out = append(out, promptBlock{Type: "text", Text: text.String()})
+			text.Reset()
+		}
+	}
+
+	for _, part := range parts {
+		for _, b := range part {
+			if b.Type == "text" {
+				text.WriteString(b.Text)
+
+				continue
+			}
+
+			flush()
+			out = append(out, b)
+		}
+	}
+
+	flush()
+
+	return out
+}
+
 // joinLines joins the parts with a newline between each two, as the text
 // prompt has always joined blocks.
 func joinLines(parts []prompt) prompt {
