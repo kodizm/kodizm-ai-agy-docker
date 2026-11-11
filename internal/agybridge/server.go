@@ -93,6 +93,10 @@ type Config struct {
 	// MaxParked bounds turns parked on tool results; at the cap a new turn
 	// evicts the oldest parked one.
 	MaxParked int
+	// MaxPromptBytes bounds the text of a replayed prompt: agy drops what passes
+	// about 192,000 bytes, from the end. LoadConfig refuses less than one; a
+	// Config built in code with zero or less has no budget.
+	MaxPromptBytes int
 	// PendingTTL is how long a parked turn waits for its tool results.
 	PendingTTL time.Duration
 	// SlotWait bounds the wait for a free slot before answering 529.
@@ -209,6 +213,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		{key: "AGY_BRIDGE_MAX_CONCURRENT", fallback: 8, target: &cfg.MaxConcurrent},
 		{key: "AGY_BRIDGE_PER_ACCOUNT", fallback: 2, target: &cfg.PerAccount},
 		{key: "AGY_BRIDGE_MAX_PARKED", fallback: 6, target: &cfg.MaxParked},
+		{key: "AGY_BRIDGE_MAX_PROMPT_BYTES", fallback: defaultMaxPromptBytes, target: &cfg.MaxPromptBytes},
 	}
 
 	for _, v := range ints {
@@ -605,6 +610,10 @@ type requestLog struct {
 	systemBytes int
 	toolChoice  string
 	maxTokens   int
+	// promptBytes is the text of the replayed prompt agy was given, 0 for a
+	// resumed turn; shrunk marks one cut down to fit the budget.
+	promptBytes int
+	shrunk      bool
 	started     time.Time
 }
 
@@ -632,7 +641,8 @@ func (l *requestLog) write() {
 			"account=%s attempts=%d affinity=%s continued=%t "+
 			"tools_grew=%t token_near_expiry=%t orphan_results=%d denied=%d clean=%t cleanup_failed=%d "+
 			"agy_tool_calls=%d agy_usage=in:%d,out:%d,cr:%d,cw:%d,th:%d,total:%d reported=in:%d,out:%d outcome=%q "+
-			"reason=%s body_bytes=%d system_bytes=%d tool_choice=%q max_tokens=%d seconds=%.2f",
+			"reason=%s body_bytes=%d system_bytes=%d prompt_bytes=%d shrunk=%t tool_choice=%q max_tokens=%d "+
+			"seconds=%.2f",
 		l.id, l.model, l.agyModel, l.level, l.messages, l.tools, l.scrubHits, l.session,
 		account, l.attempts, affinity, l.continued,
 		l.toolsGrew, l.tokenNearExpiry, l.orphans, l.denied, l.clean, l.cleanupFailed,
@@ -640,7 +650,7 @@ func (l *requestLog) write() {
 		u.InputTokens, u.OutputTokens, u.CachedReadTokens, u.CachedWriteTokens, u.ThoughtTokens, u.TotalTokens,
 		reported.InputTokens, reported.OutputTokens,
 		l.outcome,
-		cmp.Or(l.reason, "-"), l.bodyBytes, l.systemBytes, cmp.Or(l.toolChoice, "-"), l.maxTokens,
+		cmp.Or(l.reason, "-"), l.bodyBytes, l.systemBytes, l.promptBytes, l.shrunk, cmp.Or(l.toolChoice, "-"), l.maxTokens,
 		time.Since(l.started).Seconds(),
 	)
 }
@@ -851,10 +861,12 @@ func (srv *Server) openTurn(ctx context.Context, req *messagesRequest, rl *reque
 		return nil, invalidRequest(err.Error())
 	}
 
-	rendered, err := renderPrompt(req.Messages)
+	rendered, shrunk, err := renderPromptWithin(req.Messages, srv.cfg.MaxPromptBytes)
 	if err != nil {
-		return nil, invalidRequest(err.Error())
+		return nil, err
 	}
+
+	rl.promptBytes, rl.shrunk = textBytes(rendered), shrunk
 
 	model := srv.modelFor(req.Model)
 	spec := sessionSpec{
