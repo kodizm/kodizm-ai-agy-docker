@@ -123,6 +123,14 @@ func TestClassifyBanner(t *testing.T) {
 			kind:       kindCapacity,
 			retryAfter: 40 * time.Second,
 		},
+		{
+			// agy streams this in place of an answer once a five-hour or weekly window is spent.
+			name:       "an individual quota notice",
+			chunk:      "⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h43m23s.",
+			status:     http.StatusTooManyRequests,
+			kind:       kindQuota,
+			retryAfter: 4*time.Hour + 43*time.Minute + 23*time.Second,
+		},
 	}
 
 	for _, tt := range tests {
@@ -140,6 +148,7 @@ func TestClassifyBannerIgnoresOrdinaryText(t *testing.T) {
 	for _, chunk := range []string{
 		"The API error (code 429) means you are rate limited.",
 		"Your quota resets in 5h.",
+		"Individual quota reached is the text agy shows once a window is spent.",
 		"",
 	} {
 		if got := classifyBanner(chunk); got != nil {

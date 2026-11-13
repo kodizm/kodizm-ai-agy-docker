@@ -77,8 +77,10 @@ type failure struct {
 const maxRetryAfter = 7 * 24 * time.Hour
 
 var (
-	// bannerPrefixes start the text agy streams in place of an answer.
-	bannerPrefixes = []string{"⚠ API error", "⚠ Agent execution", "Authentication required"}
+	// bannerPrefixes start the text agy streams in place of an answer. A notice
+	// missing here reaches the client as an ordinary reply, so the gateway sees
+	// a 200 and cannot fail over from it.
+	bannerPrefixes = []string{"⚠ API error", "⚠ Agent execution", "⚠ Individual quota", "Authentication required"}
 
 	// retryAfterPattern finds a delay after a word such as retry, reset, delay
 	// or after: `retry in 12.5s`, `retryDelay: "30s"`, `quotaResetDelay`,
