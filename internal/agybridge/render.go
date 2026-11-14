@@ -475,20 +475,25 @@ func clientTools(defs []toolDef) []mcpTool {
 		tools = append(tools, mcpTool{
 			Name:        d.Name,
 			Description: d.Description,
-			InputSchema: stringEnumsOnly(schema),
+			InputSchema: geminiSchema(schema),
 		})
 	}
 
 	return tools
 }
 
-// stringEnumsOnly rewrites a tool schema for Gemini, which agy passes it to
-// as a function declaration: Gemini rejects an enum on any type but string
-// and agy then ends the whole turn ("Agent execution terminated"). Each such
-// enum is removed and its values go into the description, so the model still
-// sees the allowed values. A schema that needs no rewrite, or that is not
-// valid JSON, comes back byte for byte; it is the client's to get right.
-func stringEnumsOnly(schema json.RawMessage) json.RawMessage {
+// geminiSchema rewrites a tool schema for Gemini, which agy passes it to as a
+// function declaration. Gemini rejects two things other models take, and agy
+// then ends the whole turn ("Agent execution terminated"):
+//
+//   - an enum on any type but string: the enum is removed and its values go
+//     into the description, so the model still sees the allowed values;
+//   - an array that names no items ("items: missing field"): it gets an empty
+//     items schema, which Gemini takes and which still allows any element.
+//
+// A schema that needs no rewrite, or that is not valid JSON, comes back byte
+// for byte; it is the client's to get right.
+func geminiSchema(schema json.RawMessage) json.RawMessage {
 	dec := json.NewDecoder(bytes.NewReader(schema))
 	dec.UseNumber()
 
@@ -497,7 +502,10 @@ func stringEnumsOnly(schema json.RawMessage) json.RawMessage {
 		return schema
 	}
 
-	if !rewriteEnums(root) {
+	enums := rewriteEnums(root)
+	arrays := fillArrayItems(root)
+
+	if !enums && !arrays {
 		return schema
 	}
 
@@ -532,6 +540,48 @@ func rewriteEnums(node any) bool {
 	}
 
 	return changed
+}
+
+// fillArrayItems walks a decoded schema, gives every array schema that names
+// no items an empty items schema in place and reports whether it changed
+// anything.
+func fillArrayItems(node any) bool {
+	changed := false
+
+	switch n := node.(type) {
+	case map[string]any:
+		if _, ok := n["items"]; !ok && declaresArray(n["type"]) {
+			n["items"] = map[string]any{}
+			changed = true
+		}
+
+		for _, child := range n {
+			changed = fillArrayItems(child) || changed
+		}
+	case []any:
+		for _, child := range n {
+			changed = fillArrayItems(child) || changed
+		}
+	}
+
+	return changed
+}
+
+// declaresArray reports whether a schema's type is array, alone or in a list
+// such as ["array", "null"].
+func declaresArray(declared any) bool {
+	switch d := declared.(type) {
+	case string:
+		return d == "array"
+	case []any:
+		for _, name := range d {
+			if text, ok := name.(string); ok && text == "array" {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // stringEnum reports whether an enum is one Gemini takes: a declared type
