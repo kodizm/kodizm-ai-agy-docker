@@ -674,6 +674,17 @@ func TestGeminiSchema(t *testing.T) {
 			want:   `{"items":{"items":{},"type":"array"},"type":"array"}`,
 		},
 		{
+			name:   "bare array in an anyOf branch",
+			schema: `{"anyOf":[{"type":"array"},{"type":"string"}]}`,
+			want:   `{"anyOf":[{"items":{},"type":"array"},{"type":"string"}]}`,
+		},
+		{
+			name:   "properties named like schema keywords are still schemas",
+			schema: `{"type":"object","properties":{"default":{"type":"array"},"const":{"type":"array"}}}`,
+			want: `{"properties":{"const":{"items":{},"type":"array"},"default":{"items":{},"type":"array"}},` +
+				`"type":"object"}`,
+		},
+		{
 			name:   "array and enum rewrites in one schema",
 			schema: `{"type":"object","properties":{"ids":{"type":"array"},"n":{"type":"integer","enum":[1]}}}`,
 			want: `{"properties":{"ids":{"items":{},"type":"array"},` +
@@ -701,6 +712,8 @@ func TestGeminiSchemaLeavesAcceptedSchemasUntouched(t *testing.T) {
 		`{"type":"array","items":{"type":"string"}}`,
 		`{"type":"array","items":{}}`,
 		`{"type":"object","properties":{"type":{"type":"string"},"items":{"type":"integer"}}}`,
+		`{"const":{"type":"array"},"default":{"type":"array"},"examples":[{"type":"array"}]}`,
+		`{"type":"array"} trailing text`,
 		`not json`,
 	} {
 		if got := geminiSchema(json.RawMessage(schema)); string(got) != schema {

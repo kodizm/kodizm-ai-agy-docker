@@ -489,16 +489,18 @@ func clientTools(defs []toolDef) []mcpTool {
 //   - an enum on any type but string: the enum is removed and its values go
 //     into the description, so the model still sees the allowed values;
 //   - an array that names no items ("items: missing field"): it gets an empty
-//     items schema, which Gemini takes and which still allows any element.
+//     items schema, which Gemini takes and which allows any element.
 //
-// A schema that needs no rewrite, or that is not valid JSON, comes back byte
-// for byte; it is the client's to get right.
+// Both rewrites are valid JSON Schema, so they apply to every model the bridge
+// serves, not only to Gemini. The copy agy sees is the only one changed: the
+// client keeps its own schema. A schema that needs no rewrite, or that is not
+// valid JSON, comes back byte for byte; it is the client's to get right.
 func geminiSchema(schema json.RawMessage) json.RawMessage {
 	dec := json.NewDecoder(bytes.NewReader(schema))
 	dec.UseNumber()
 
 	var root any
-	if err := dec.Decode(&root); err != nil {
+	if err := dec.Decode(&root); err != nil || dec.More() {
 		return schema
 	}
 
@@ -542,25 +544,53 @@ func rewriteEnums(node any) bool {
 	return changed
 }
 
+// schemaValues are the keywords whose value is data, not a schema: a constant
+// that happens to look like {"type":"array"} is the client's value to keep.
+var schemaValues = map[string]bool{
+	"const":    true,
+	"default":  true,
+	"enum":     true,
+	"examples": true,
+}
+
+// schemaNameMaps are the keywords whose value maps a name to a schema, so a
+// key there is a property name even when it reads like a keyword.
+var schemaNameMaps = map[string]bool{
+	"$defs":             true,
+	"definitions":       true,
+	"patternProperties": true,
+	"properties":        true,
+}
+
 // fillArrayItems walks a decoded schema, gives every array schema that names
 // no items an empty items schema in place and reports whether it changed
-// anything.
+// anything. A name map (properties) is not a schema itself and the data
+// keywords are not walked.
 func fillArrayItems(node any) bool {
+	return fillItems(node, false)
+}
+
+// fillItems is fillArrayItems; names is true while node maps names to schemas.
+func fillItems(node any, names bool) bool {
 	changed := false
 
 	switch n := node.(type) {
 	case map[string]any:
-		if _, ok := n["items"]; !ok && declaresArray(n["type"]) {
+		if _, ok := n["items"]; !names && !ok && declaresArray(n["type"]) {
 			n["items"] = map[string]any{}
 			changed = true
 		}
 
-		for _, child := range n {
-			changed = fillArrayItems(child) || changed
+		for key, child := range n {
+			if !names && schemaValues[key] {
+				continue
+			}
+
+			changed = fillItems(child, !names && schemaNameMaps[key]) || changed
 		}
 	case []any:
 		for _, child := range n {
-			changed = fillArrayItems(child) || changed
+			changed = fillItems(child, false) || changed
 		}
 	}
 
