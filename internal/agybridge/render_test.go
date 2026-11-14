@@ -349,6 +349,30 @@ func TestClientToolsRewritesNonStringEnums(t *testing.T) {
 	}
 }
 
+// Gemini rejects an array schema with no items ("items: missing field") and agy ends the whole turn:
+// the PR reviewer's read_pull_request_diff declared `paths` as a bare array and every Gemini rung answered 502.
+func TestClientToolsGivesArraysAnItems(t *testing.T) {
+	var defs []toolDef
+
+	raw := `[{"name":"read_diff","input_schema":{"type":"object","properties":{"paths":{"type":"array"}}}}]`
+
+	if err := json.Unmarshal([]byte(raw), &defs); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := json.Marshal(clientTools(defs))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := `[{"name":"read_diff","description":"","inputSchema":` +
+		`{"properties":{"paths":{"items":{},"type":"array"}},"type":"object"}}]`
+
+	if string(got) != want {
+		t.Fatalf("clientTools =\n%s\nwant\n%s", got, want)
+	}
+}
+
 // agy hands a tool schema to Gemini, which rejects an enum on anything but a
 // string and ends the whole turn: the enum moves into the description.
 // Claude Code's compaction forks the conversation with the same tools and ends it with a no-tools reminder.
@@ -596,7 +620,7 @@ func jsonString(s string) json.RawMessage {
 	return raw
 }
 
-func TestStringEnumsOnly(t *testing.T) {
+func TestGeminiSchema(t *testing.T) {
 	tests := []struct {
 		name   string
 		schema string
@@ -634,29 +658,66 @@ func TestStringEnumsOnly(t *testing.T) {
 			want: `{"properties":{"enum":{"description":"One of: 7","type":"integer"},` +
 				`"type":{"type":"string"}},"type":"object"}`,
 		},
+		{
+			name:   "array without items gets an open items schema",
+			schema: `{"type":"object","properties":{"paths":{"type":"array"}}}`,
+			want:   `{"properties":{"paths":{"items":{},"type":"array"}},"type":"object"}`,
+		},
+		{
+			name:   "nullable array without items",
+			schema: `{"type":["array","null"]}`,
+			want:   `{"items":{},"type":["array","null"]}`,
+		},
+		{
+			name:   "array nested in an array without items",
+			schema: `{"type":"array","items":{"type":"array"}}`,
+			want:   `{"items":{"items":{},"type":"array"},"type":"array"}`,
+		},
+		{
+			name:   "bare array in an anyOf branch",
+			schema: `{"anyOf":[{"type":"array"},{"type":"string"}]}`,
+			want:   `{"anyOf":[{"items":{},"type":"array"},{"type":"string"}]}`,
+		},
+		{
+			name:   "properties named like schema keywords are still schemas",
+			schema: `{"type":"object","properties":{"default":{"type":"array"},"const":{"type":"array"}}}`,
+			want: `{"properties":{"const":{"items":{},"type":"array"},"default":{"items":{},"type":"array"}},` +
+				`"type":"object"}`,
+		},
+		{
+			name:   "array and enum rewrites in one schema",
+			schema: `{"type":"object","properties":{"ids":{"type":"array"},"n":{"type":"integer","enum":[1]}}}`,
+			want: `{"properties":{"ids":{"items":{},"type":"array"},` +
+				`"n":{"description":"One of: 1","type":"integer"}},"type":"object"}`,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := stringEnumsOnly(json.RawMessage(tt.schema))
+			got := geminiSchema(json.RawMessage(tt.schema))
 
 			if string(got) != tt.want {
-				t.Fatalf("stringEnumsOnly =\n%s\nwant\n%s", got, tt.want)
+				t.Fatalf("geminiSchema =\n%s\nwant\n%s", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestStringEnumsOnlyLeavesAcceptedSchemasUntouched(t *testing.T) {
+func TestGeminiSchemaLeavesAcceptedSchemasUntouched(t *testing.T) {
 	for _, schema := range []string{
 		`{"type":"object","required":["path"],"properties":{"mode":{"type":"string","enum":["r","w"]}}}`,
 		`{"enum":["a","b"]}`,
 		`{"type":["string","null"],"enum":["a",null]}`,
 		`{"type":"object"}`,
+		`{"type":"array","items":{"type":"string"}}`,
+		`{"type":"array","items":{}}`,
+		`{"type":"object","properties":{"type":{"type":"string"},"items":{"type":"integer"}}}`,
+		`{"const":{"type":"array"},"default":{"type":"array"},"examples":[{"type":"array"}]}`,
+		`{"type":"array"} trailing text`,
 		`not json`,
 	} {
-		if got := stringEnumsOnly(json.RawMessage(schema)); string(got) != schema {
-			t.Fatalf("stringEnumsOnly(%s) = %s, want it unchanged", schema, got)
+		if got := geminiSchema(json.RawMessage(schema)); string(got) != schema {
+			t.Fatalf("geminiSchema(%s) = %s, want it unchanged", schema, got)
 		}
 	}
 }
