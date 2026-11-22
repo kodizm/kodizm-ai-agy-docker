@@ -194,10 +194,12 @@ func hasStatus(lower, code string) bool {
 // agy runs in its own process group so that killing it also takes down the
 // helpers it starts, the MCP stub among them.
 type agent struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	onChunk  func(text string)
-	onDenied func(method, kind, tool string)
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	onChunk func(text string)
+	// onPermission decides a session/request_permission: the id of the option
+	// to select, or "" to answer cancelled.
+	onPermission func(permissionRequest) string
 	// onToolCall runs for every tool call agy starts itself (its own web
 	// search among them) or hands to the client.
 	onToolCall func()
@@ -318,9 +320,10 @@ func (t *tailBuffer) masked() string {
 }
 
 // startAgent spawns agy with home as its HOME; cancelling ctx kills it.
-// onChunk receives every agent_message_chunk text, onDenied the method of
-// every agent request answered cancelled and onToolCall every tool_call
-// update, all on the reader goroutine; none may block. stderr receives agy's
+// onChunk receives every agent_message_chunk text, onPermission every
+// permission request, which it answers with an option id or cancels, and
+// onToolCall every tool_call update, all on the reader goroutine; none may
+// block. stderr receives agy's
 // stderr until the process is reaped.
 // extraArgs go between `acp` and `--disable-telemetry`.
 func startAgent(
@@ -330,7 +333,7 @@ func startAgent(
 	home string,
 	stderr io.Writer,
 	onChunk func(string),
-	onDenied func(method, kind, tool string),
+	onPermission func(permissionRequest) string,
 	onToolCall func(),
 ) (*agent, error) {
 	args := append(append([]string{"acp"}, extraArgs...), "--disable-telemetry")
@@ -342,12 +345,12 @@ func startAgent(
 	cmd.Stderr = stderr
 
 	a := &agent{
-		cmd:        cmd,
-		onChunk:    onChunk,
-		onDenied:   onDenied,
-		onToolCall: onToolCall,
-		waiting:    map[int64]chan rpcMessage{},
-		readDone:   make(chan struct{}),
+		cmd:          cmd,
+		onChunk:      onChunk,
+		onPermission: onPermission,
+		onToolCall:   onToolCall,
+		waiting:      map[int64]chan rpcMessage{},
+		readDone:     make(chan struct{}),
 	}
 	cmd.Cancel = a.kill
 
@@ -523,14 +526,24 @@ func (a *agent) dispatch(line []byte) {
 	}
 }
 
-// deny answers every agent request, permission prompts above all: the client
-// performs each action itself, and an unanswered request stalls the turn.
+// deny answers every agent request cancelled, permission prompts above all:
+// the client performs each action itself, and an unanswered request stalls
+// the turn. The one exception is a permission request onPermission accepts.
 func (a *agent) deny(m rpcMessage) {
-	answer := rpcResponse{
-		JSONRPC: "2.0",
-		ID:      m.ID,
-		Result:  map[string]any{"outcome": map[string]string{"outcome": "cancelled"}},
+	outcome := map[string]string{"outcome": "cancelled"}
+
+	if m.Method == "session/request_permission" {
+		var request permissionRequest
+		if err := json.Unmarshal(m.Params, &request); err != nil {
+			request = permissionRequest{}
+		}
+
+		if id := a.onPermission(request); id != "" {
+			outcome = map[string]string{"outcome": "selected", "optionId": id}
+		}
 	}
+
+	answer := rpcResponse{JSONRPC: "2.0", ID: m.ID, Result: map[string]any{"outcome": outcome}}
 
 	if err := a.send(answer); err != nil {
 		log.Printf("answer agy %s: %v", m.Method, err)
@@ -539,52 +552,86 @@ func (a *agent) deny(m rpcMessage) {
 	}
 
 	a.touch()
-
-	kind, tool := "-", "-"
-	if m.Method == "session/request_permission" {
-		kind, tool = permissionLabel(m.Params)
-	}
-
-	a.onDenied(m.Method, kind, tool)
 }
 
-// permissionKind is the ACP tool kind agy names in a permission request: a
-// plain lowercase word such as fetch or execute.
+// permissionRequest is the part of agy's session/request_permission the
+// bridge reads: what is asked for and the options that answer it.
+type permissionRequest struct {
+	ToolCall struct {
+		Kind  string `json:"kind"`
+		Title string `json:"title"`
+	} `json:"toolCall"`
+	Options []struct {
+		ID   string `json:"optionId"`
+		Kind string `json:"kind"`
+	} `json:"options"`
+}
+
+// permissionKind is an ACP kind agy names, a plain lowercase word such as
+// fetch, other, allow_once.
 var permissionKind = regexp.MustCompile(`^[a-z_]{1,24}$`)
 
-// permissionTool is a tool name: the first word of a request's title must be
-// one whole, short word of these characters to be logged.
-var permissionTool = regexp.MustCompile(`^[A-Za-z0-9_-]{1,24}$`)
+// permissionWord is one word of a title the log may carry.
+var permissionWord = regexp.MustCompile(`^[A-Za-z0-9_/-]{1,32}$`)
 
-// permissionLabel names what agy asked permission for so a denied tool shows
-// in the log. It keeps the tool kind and the first word of the title only:
-// the rest of a title or the request's input can carry a URL, a path or a
-// secret, so it is never read, and a first word that is long or carries a dot
-// (a host name, a token) is not a tool name. A part that is not a plain word
-// is "-".
-func permissionLabel(params json.RawMessage) (kind, tool string) {
-	var request struct {
-		ToolCall struct {
-			Kind  string `json:"kind"`
-			Title string `json:"title"`
-		} `json:"toolCall"`
+// optionFor is the id of the option of the given kind, "" when there is none.
+func (r permissionRequest) optionFor(kind string) string {
+	for _, option := range r.Options {
+		if option.Kind == kind && option.ID != "" {
+			return option.ID
+		}
 	}
 
-	kind, tool = "-", "-"
+	return ""
+}
 
-	if json.Unmarshal(params, &request) != nil {
-		return kind, tool
+// names reports whether the title names one of the client's tools as a whole
+// word, with or without agy's mcp_client_ prefix.
+func (r permissionRequest) names(tools []string) bool {
+	for _, tool := range tools {
+		pattern := `(^|[^A-Za-z0-9_])(mcp_client_)?` + regexp.QuoteMeta(tool) + `($|[^A-Za-z0-9_])`
+
+		if regexp.MustCompile(pattern).MatchString(r.ToolCall.Title) {
+			return true
+		}
 	}
 
-	if permissionKind.MatchString(request.ToolCall.Kind) {
-		kind = request.ToolCall.Kind
+	return false
+}
+
+// label describes the request for the log without its arguments: the kind,
+// the option kinds and the first four words of the title that are plain
+// short words. A title can carry a URL, a path or a secret after those, so
+// nothing else is read. A part that is not plain is "-".
+func (r permissionRequest) label() (kind, words, options string) {
+	kind = "-"
+	if permissionKind.MatchString(r.ToolCall.Kind) {
+		kind = r.ToolCall.Kind
 	}
 
-	if words := strings.Fields(request.ToolCall.Title); len(words) > 0 && permissionTool.MatchString(words[0]) {
-		tool = words[0]
+	var kept []string
+
+	for _, word := range strings.Fields(r.ToolCall.Title) {
+		if len(kept) == 4 {
+			break
+		}
+
+		if permissionWord.MatchString(word) {
+			kept = append(kept, word)
+		} else {
+			kept = append(kept, "-")
+		}
 	}
 
-	return kind, tool
+	var kinds []string
+
+	for _, option := range r.Options {
+		if permissionKind.MatchString(option.Kind) {
+			kinds = append(kinds, option.Kind)
+		}
+	}
+
+	return kind, strings.Join(kept, "_"), strings.Join(kinds, ",")
 }
 
 // touch notes a sign of life.

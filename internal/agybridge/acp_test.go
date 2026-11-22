@@ -301,29 +301,48 @@ func TestParsePromptCapabilities(t *testing.T) {
 	}
 }
 
-func TestPermissionLabelKeepsOnlyAPlainKindAndToolWord(t *testing.T) {
+func TestPermissionLabelKeepsOnlyPlainWords(t *testing.T) {
 	tests := []struct {
-		name     string
-		params   string
-		wantKind string
-		wantTool string
+		name        string
+		params      string
+		wantKind    string
+		wantWords   string
+		wantOptions string
 	}{
-		{"fetch with arguments", `{"toolCall":{"kind":"fetch","title":"read_url_content https://x.test/?t=1"}}`, "fetch", "read_url_content"},
-		{"mcp tool", `{"toolCall":{"kind":"other","title":"mcp_client_Bash"}}`, "other", "mcp_client_Bash"},
-		{"kind that is not a plain word", `{"toolCall":{"kind":"fetch; rm -rf","title":"Read"}}`, "-", "Read"},
-		{"title that opens with a symbol", `{"toolCall":{"kind":"fetch","title":"\"quoted\""}}`, "fetch", "-"},
-		{"host name or token as the first word", `{"toolCall":{"kind":"fetch","title":"feeds.example.test ghp_abcdefghijklmnopqrstuvwxyz0123456789"}}`, "fetch", "-"},
-		{"long first word", `{"toolCall":{"kind":"fetch","title":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}}`, "fetch", "-"},
-		{"no tool call", `{"sessionId":"s"}`, "-", "-"},
-		{"not json", `nope`, "-", "-"},
+		{"fetch with arguments", `{"toolCall":{"kind":"fetch","title":"read_url_content https://x.test/?t=1"}}`, "fetch", "read_url_content_-", ""},
+		{"client tool", `{"toolCall":{"kind":"other","title":"Run mcp_client_Bash now please extra"},"options":[{"optionId":"a","kind":"allow_once"},{"optionId":"b","kind":"reject_once"}]}`, "other", "Run_mcp_client_Bash_now_please", "allow_once,reject_once"},
+		{"kind that is not a plain word", `{"toolCall":{"kind":"fetch;x","title":"Read"}}`, "-", "Read", ""},
+		{"token as a word", `{"toolCall":{"kind":"fetch","title":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}}`, "fetch", "-", ""},
+		{"no tool call", `{"sessionId":"s"}`, "-", "", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			kind, tool := permissionLabel(json.RawMessage(tt.params))
-			if kind != tt.wantKind || tool != tt.wantTool {
-				t.Fatalf("kind %q tool %q, want %q %q", kind, tool, tt.wantKind, tt.wantTool)
+			var request permissionRequest
+			if err := json.Unmarshal([]byte(tt.params), &request); err != nil {
+				t.Fatal(err)
+			}
+
+			kind, words, options := request.label()
+			if kind != tt.wantKind || words != tt.wantWords || options != tt.wantOptions {
+				t.Fatalf("kind %q words %q options %q, want %q %q %q", kind, words, options, tt.wantKind, tt.wantWords, tt.wantOptions)
 			}
 		})
+	}
+}
+
+func TestPermissionRequestNamesClientTools(t *testing.T) {
+	request := permissionRequest{}
+	request.ToolCall.Title = "Run mcp_client_get_time"
+
+	for tool, want := range map[string]bool{"get_time": true, "time": false, "get": false, "Bash": false} {
+		if got := request.names([]string{tool}); got != want {
+			t.Fatalf("names(%q) = %t, want %t", tool, got, want)
+		}
+	}
+
+	request.ToolCall.Title = "Run command ls"
+	if request.names([]string{"get_time", "read_file"}) {
+		t.Fatal("a title that names no declared tool must not match")
 	}
 }

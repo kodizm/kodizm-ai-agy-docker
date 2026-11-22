@@ -1044,7 +1044,7 @@ func TestDeniedEmptyTurnFails(t *testing.T) {
 
 	line := logs.String()
 
-	if !strings.Contains(line, "kind=fetch tool=read_url_content") {
+	if !strings.Contains(line, "kind=fetch title=read_url_content_-") {
 		t.Fatalf("want the denied tool named in the log:\n%s", line)
 	}
 
@@ -1055,4 +1055,24 @@ func TestDeniedEmptyTurnFails(t *testing.T) {
 	if strings.Contains(line, "s3cret") || strings.Contains(line, "feeds.example.test") {
 		t.Fatalf("a URL from the permission title reached the log:\n%s", line)
 	}
+}
+
+// A permission request that names one of the client's tools is answered with its allow-once option, so the call
+// reaches the stub; the same request for a tool the client did not declare stays cancelled.
+func TestPermissionRequestForAClientToolIsAllowed(t *testing.T) {
+	logs := captureLog(t)
+	b := newBridge(t, nil)
+
+	if got := b.ask(t, "permitted", readFileTool); got != "allowed" {
+		t.Fatalf("answer %q, want the allow option selected", got)
+	}
+
+	b.waitIdle(t)
+
+	if line := logs.String(); !strings.Contains(line, "agy permission request for a client tool allowed: kind=other title=Run_mcp_client_read_file options=reject_once,allow_once") {
+		t.Fatalf("want the allowed request in the log:\n%s", line)
+	}
+
+	resp := b.post(t, map[string]any{"model": "x", "tools": readFileTool, "messages": userText("SCRIPT:deniedempty")})
+	expectStatus(t, resp, http.StatusBadGateway)
 }
