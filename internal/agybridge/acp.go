@@ -255,6 +255,11 @@ func (e *rpcError) Error() string {
 // errAgyStart marks a failure to launch agy at all.
 var errAgyStart = errors.New("start agy")
 
+// errPermissionDenied marks a turn that agy ended with no text after the
+// bridge answered one of its permission requests cancelled: the tool call it
+// wanted never ran, so the empty end_turn is a failure, not an answer.
+var errPermissionDenied = errors.New("agy ended the turn empty after a cancelled permission request")
+
 // agentEnv is the environment agy runs with: the bridge's own without the
 // bridge API key, which agy and the model behind it have no use for, with
 // agy's self-updater off so a running bridge never changes the agy it pinned,
@@ -531,6 +536,48 @@ func (a *agent) deny(m rpcMessage) {
 
 	a.touch()
 	a.onDenied(m.Method)
+
+	if m.Method == "session/request_permission" {
+		kind, tool := permissionLabel(m.Params)
+
+		log.Printf("agy permission request answered cancelled: kind=%s tool=%s", kind, tool)
+	}
+}
+
+// permissionKind is the ACP tool kind agy names in a permission request: a
+// plain lowercase word such as fetch or execute.
+var permissionKind = regexp.MustCompile(`^[a-z_]{1,24}$`)
+
+// permissionTool is the leading tool name of a request's title.
+var permissionTool = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,48}`)
+
+// permissionLabel names what agy asked permission for so a denied tool shows
+// in the log. It keeps the tool kind and the first word of the title only:
+// the rest of a title or the request's input can carry a URL, a path or a
+// secret, so it is never read. A part that is not a plain word is "-".
+func permissionLabel(params json.RawMessage) (kind, tool string) {
+	var request struct {
+		ToolCall struct {
+			Kind  string `json:"kind"`
+			Title string `json:"title"`
+		} `json:"toolCall"`
+	}
+
+	kind, tool = "-", "-"
+
+	if json.Unmarshal(params, &request) != nil {
+		return kind, tool
+	}
+
+	if permissionKind.MatchString(request.ToolCall.Kind) {
+		kind = request.ToolCall.Kind
+	}
+
+	if word := permissionTool.FindString(strings.TrimSpace(request.ToolCall.Title)); word != "" {
+		tool = word
+	}
+
+	return kind, tool
 }
 
 // touch notes a sign of life.

@@ -243,6 +243,10 @@ type session struct {
 	// denied counts agy permission requests answered cancelled.
 	denied atomic.Int64
 
+	// textBytes counts the answer text agy has streamed in the session. A turn
+	// that ends with a denied request and no text at all is a failure.
+	textBytes atomic.Int64
+
 	// agyToolCalls counts the tool_call updates agy sent: a turn that made
 	// any made more than one model call, so its usage total is not one call's.
 	agyToolCalls atomic.Int64
@@ -506,6 +510,7 @@ func (s *session) onChunk(text string) {
 		return
 	}
 
+	s.textBytes.Add(int64(len(text)))
 	s.events.push(event{kind: eventText, text: text})
 }
 
@@ -1008,6 +1013,13 @@ func (srv *Server) converse(s *session, spec sessionSpec) (turnEnd, error) {
 		log.Printf("session %s: agy stopReason=%q reported as %s", s.tag, result.StopReason, mapped)
 	}
 
+	// 5. A turn that ended empty after a cancelled permission request answered
+	// nothing: the gateway reads a 200 end_turn as an answer and never fails
+	// over, so it becomes an error the gateway walks past.
+	if mapped == "end_turn" && s.denied.Load() > 0 && s.textBytes.Load() == 0 {
+		return turnEnd{}, errPermissionDenied
+	}
+
 	return turnEnd{stopReason: mapped, usage: result.Usage}, nil
 }
 
@@ -1125,6 +1137,10 @@ func (s *session) failureFor(err error) error {
 		log.Printf("session %s: %v", s.tag, err)
 
 		return &apiError{status: http.StatusBadGateway, kind: "api_error", message: "agy failed to start"}
+	case errors.Is(err, errPermissionDenied):
+		log.Printf("session %s: %v", s.tag, err)
+
+		return &apiError{status: http.StatusBadGateway, kind: "api_error", message: "agy could not run the tool it asked for"}
 	case s.ctx.Err() != nil:
 		// Killed on purpose (client gone, expiry, shutdown, a banner): nothing
 		// to report.

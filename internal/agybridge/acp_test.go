@@ -300,3 +300,28 @@ func TestParsePromptCapabilities(t *testing.T) {
 		})
 	}
 }
+
+func TestPermissionLabelKeepsOnlyAPlainKindAndToolWord(t *testing.T) {
+	tests := []struct {
+		name     string
+		params   string
+		wantKind string
+		wantTool string
+	}{
+		{"fetch with arguments", `{"toolCall":{"kind":"fetch","title":"read_url_content https://x.test/?t=1"}}`, "fetch", "read_url_content"},
+		{"mcp tool", `{"toolCall":{"kind":"other","title":"mcp_client_Bash"}}`, "other", "mcp_client_Bash"},
+		{"kind that is not a plain word", `{"toolCall":{"kind":"fetch; rm -rf","title":"Read"}}`, "-", "Read"},
+		{"title that opens with a symbol", `{"toolCall":{"kind":"fetch","title":"\"quoted\""}}`, "fetch", "-"},
+		{"no tool call", `{"sessionId":"s"}`, "-", "-"},
+		{"not json", `nope`, "-", "-"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kind, tool := permissionLabel(json.RawMessage(tt.params))
+			if kind != tt.wantKind || tool != tt.wantTool {
+				t.Fatalf("kind %q tool %q, want %q %q", kind, tool, tt.wantKind, tt.wantTool)
+			}
+		})
+	}
+}

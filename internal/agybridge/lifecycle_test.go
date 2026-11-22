@@ -1030,3 +1030,25 @@ func expectOverloaded(t *testing.T, resp *http.Response) {
 		t.Fatalf("error body = %+v", got)
 	}
 }
+
+// A turn agy ends with no text after the bridge cancelled one of its permission requests is a failure the gateway
+// walks past, not an empty answer, and the log names the tool without its arguments.
+func TestDeniedEmptyTurnFails(t *testing.T) {
+	logs := captureLog(t)
+	b := newBridge(t, nil)
+
+	resp := b.post(t, map[string]any{"model": "x", "messages": userText("SCRIPT:deniedempty")})
+	expectStatus(t, resp, http.StatusBadGateway)
+
+	b.waitIdle(t)
+
+	line := logs.String()
+
+	if !strings.Contains(line, "kind=fetch tool=read_url_content") {
+		t.Fatalf("want the denied tool named in the log:\n%s", line)
+	}
+
+	if strings.Contains(line, "s3cret") || strings.Contains(line, "feeds.example.test") {
+		t.Fatalf("a URL from the permission title reached the log:\n%s", line)
+	}
+}
