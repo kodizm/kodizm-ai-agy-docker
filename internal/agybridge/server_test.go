@@ -1037,11 +1037,10 @@ func TestAgyStateIsRemovedWhenTheSessionEnds(t *testing.T) {
 			b := newBridge(t, map[string]string{"AGY_BRIDGE_CLEAN": clean})
 
 			// 1. While the session runs, agy has persisted its files beside the
-			// login and the settings file it was given.
+			// login it was given.
 			var during []string
-			if err := json.Unmarshal([]byte(b.ask(t, "state", readFileTool)), &during); err != nil || len(during) != 10 ||
-				!slices.Contains(during, "antigravity-oauth-token") || !slices.Contains(during, "installation_id") ||
-				!slices.Contains(during, "settings.json") {
+			if err := json.Unmarshal([]byte(b.ask(t, "state", readFileTool)), &during); err != nil || len(during) != 9 ||
+				!slices.Contains(during, "antigravity-oauth-token") || !slices.Contains(during, "installation_id") {
 				t.Fatalf("state during the session: %v, %v", during, err)
 			}
 

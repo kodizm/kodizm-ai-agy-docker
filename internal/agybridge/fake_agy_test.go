@@ -703,6 +703,20 @@ func (f *fakeAgy) prompt(id json.RawMessage, prompt string) {
 		f.chunk("Hello")
 		f.chunk(", world")
 		f.end(id, "end_turn", 11, 7)
+	case "permitted":
+		permission := f.bridge.request("session/request_permission", map[string]any{
+			"sessionId": "fake-session",
+			"toolCall":  map[string]any{"toolCallId": "call-1", "title": "Run mcp_client_read_file", "kind": "other"},
+			"options": []map[string]string{
+				{"optionId": "reject-1", "kind": "reject_once"},
+				{"optionId": "allow-1", "kind": "allow_once"},
+			},
+		})
+		if strings.Contains(string(permission.Result), `"selected"`) && strings.Contains(string(permission.Result), `"allow-1"`) {
+			f.chunk("allowed")
+		}
+
+		f.end(id, "end_turn", 5, 1)
 	case "deniedempty":
 		f.bridge.request("session/request_permission", map[string]any{
 			"sessionId": "fake-session",

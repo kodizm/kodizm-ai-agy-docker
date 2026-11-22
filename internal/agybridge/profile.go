@@ -24,9 +24,6 @@ const (
 	// agyTokenPath is where agy 1.5.2 reads its login, below HOME.
 	agyTokenPath = ".gemini/antigravity-cli/antigravity-oauth-token"
 
-	// agySettingsPath is agy's settings file, below HOME. agy loads it in acp mode too.
-	agySettingsPath = ".gemini/antigravity-cli/settings.json"
-
 	installationIDFile = "installation_id"
 )
 
@@ -223,10 +220,6 @@ func (h *spawnHomes) prepare(acct Account) (string, error) {
 		err = writeLogin(home, acct, installation)
 	}
 
-	if err == nil {
-		err = writeSettings(home)
-	}
-
 	if err != nil {
 		return "", errors.Join(err, h.remove(home))
 	}
@@ -320,35 +313,6 @@ func writeLogin(home string, acct Account, installation []byte) error {
 
 	if err := writeNew(filepath.Join(dir, installationIDFile), installation); err != nil {
 		return fmt.Errorf("agy installation id: %w", err)
-	}
-
-	return nil
-}
-
-// settingsFile is agy's settings.json as far as the bridge sets it.
-type settingsFile struct {
-	Permissions struct {
-		Allow []string `json:"allow"`
-	} `json:"permissions"`
-}
-
-// writeSettings allows agy to call the tools of the client's MCP server
-// without asking. agy 1.5.8 applies its permission rules to eager MCP tools
-// too, and an ask is answered cancelled by the bridge, so without this rule
-// a client tool call would end the turn empty. Nothing else is allowed: agy's
-// own tools keep asking, and the bridge keeps denying.
-func writeSettings(home string) error {
-	var settings settingsFile
-
-	settings.Permissions.Allow = []string{"mcp(" + mcpServerName + "/*)"}
-
-	raw, err := json.Marshal(settings)
-	if err != nil {
-		return err
-	}
-
-	if err := writeNew(filepath.Join(home, agySettingsPath), raw); err != nil {
-		return fmt.Errorf("agy settings file: %w", err)
 	}
 
 	return nil

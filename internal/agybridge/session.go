@@ -548,12 +548,27 @@ func (s *session) recordedFailure() *failure {
 	return s.failure
 }
 
-func (s *session) onDenied(method, kind, tool string) {
-	if method == "session/request_permission" {
-		s.denied.Add(1)
+// onPermission answers one of agy's permission requests. agy asks before it
+// runs a tool of the client's MCP server, and the client performs those
+// tools itself through the stub, so a request that names one of the tools agy
+// listed gets its allow-once option. Anything else, agy's own tools included,
+// is answered cancelled and counted.
+func (s *session) onPermission(request permissionRequest) string {
+	kind, words, options := request.label()
 
-		log.Printf("session %s: agy permission request answered cancelled: kind=%s tool=%s", s.tag, kind, tool)
+	if id := request.optionFor("allow_once"); id != "" && request.names(s.tools) {
+		log.Printf("session %s: agy permission request for a client tool allowed: kind=%s title=%s options=%s",
+			s.tag, kind, words, options)
+
+		return id
 	}
+
+	s.denied.Add(1)
+
+	log.Printf("session %s: agy permission request answered cancelled: kind=%s title=%s options=%s",
+		s.tag, kind, words, options)
+
+	return ""
 }
 
 func (s *session) onToolCall() {
@@ -963,7 +978,7 @@ func (srv *Server) converse(s *session, spec sessionSpec) (turnEnd, error) {
 		extraArgs = cleanArgs()
 	}
 
-	a, err := startAgent(s.ctx, srv.cfg.AgyBin, extraArgs, home, &s.stderr, s.onChunk, s.onDenied, s.onToolCall)
+	a, err := startAgent(s.ctx, srv.cfg.AgyBin, extraArgs, home, &s.stderr, s.onChunk, s.onPermission, s.onToolCall)
 	if err != nil {
 		return turnEnd{}, err
 	}
