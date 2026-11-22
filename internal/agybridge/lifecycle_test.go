@@ -1048,6 +1048,10 @@ func TestDeniedEmptyTurnFails(t *testing.T) {
 		t.Fatalf("want the denied tool named in the log:\n%s", line)
 	}
 
+	if !strings.Contains(line, "reason=permission_denied") {
+		t.Fatalf("want the failure reason in the request line:\n%s", line)
+	}
+
 	if strings.Contains(line, "s3cret") || strings.Contains(line, "feeds.example.test") {
 		t.Fatalf("a URL from the permission title reached the log:\n%s", line)
 	}

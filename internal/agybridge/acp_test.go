@@ -312,6 +312,8 @@ func TestPermissionLabelKeepsOnlyAPlainKindAndToolWord(t *testing.T) {
 		{"mcp tool", `{"toolCall":{"kind":"other","title":"mcp_client_Bash"}}`, "other", "mcp_client_Bash"},
 		{"kind that is not a plain word", `{"toolCall":{"kind":"fetch; rm -rf","title":"Read"}}`, "-", "Read"},
 		{"title that opens with a symbol", `{"toolCall":{"kind":"fetch","title":"\"quoted\""}}`, "fetch", "-"},
+		{"host name or token as the first word", `{"toolCall":{"kind":"fetch","title":"feeds.example.test ghp_abcdefghijklmnopqrstuvwxyz0123456789"}}`, "fetch", "-"},
+		{"long first word", `{"toolCall":{"kind":"fetch","title":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"}}`, "fetch", "-"},
 		{"no tool call", `{"sessionId":"s"}`, "-", "-"},
 		{"not json", `nope`, "-", "-"},
 	}

@@ -548,9 +548,11 @@ func (s *session) recordedFailure() *failure {
 	return s.failure
 }
 
-func (s *session) onDenied(method string) {
+func (s *session) onDenied(method, kind, tool string) {
 	if method == "session/request_permission" {
 		s.denied.Add(1)
+
+		log.Printf("session %s: agy permission request answered cancelled: kind=%s tool=%s", s.tag, kind, tool)
 	}
 }
 
@@ -1076,7 +1078,7 @@ func (srv *Server) toolServer(s *session, tools []mcpTool) (mcpServer, error) {
 	}
 
 	return mcpServer{
-		Name:    "client",
+		Name:    mcpServerName,
 		Command: srv.selfExe,
 		Args:    []string{"mcp-stub"},
 		Env: []envVar{
@@ -1140,7 +1142,12 @@ func (s *session) failureFor(err error) error {
 	case errors.Is(err, errPermissionDenied):
 		log.Printf("session %s: %v", s.tag, err)
 
-		return &apiError{status: http.StatusBadGateway, kind: "api_error", message: "agy could not run the tool it asked for"}
+		return &apiError{
+			status:  http.StatusBadGateway,
+			kind:    "api_error",
+			message: "agy could not run the tool it asked for",
+			reason:  reasonPermissionDenied,
+		}
 	case s.ctx.Err() != nil:
 		// Killed on purpose (client gone, expiry, shutdown, a banner): nothing
 		// to report.
