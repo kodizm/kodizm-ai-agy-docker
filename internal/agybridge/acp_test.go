@@ -53,6 +53,12 @@ func TestClassifyBanner(t *testing.T) {
 			kind:   kindAuth,
 		},
 		{
+			name:   "status name and code without API error before them",
+			chunk:  "⚠ RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).",
+			status: http.StatusTooManyRequests,
+			kind:   kindQuota,
+		},
+		{
 			name:   "unauthenticated",
 			chunk:  "⚠ API error (attempt 1): UNAUTHENTICATED (code 401): invalid credentials",
 			status: http.StatusBadGateway,

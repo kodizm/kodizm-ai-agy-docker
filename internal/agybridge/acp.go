@@ -82,6 +82,11 @@ var (
 	// a 200 and cannot fail over from it.
 	bannerPrefixes = []string{"⚠ API error", "⚠ Agent execution", "⚠ Individual quota", "Authentication required"}
 
+	// bannerStatus is a notice that opens with the status name and code and no
+	// "API error" before them: `⚠ RESOURCE_EXHAUSTED (code 429): ...`, seen
+	// from Gemini 4 Neon after agy's own retries.
+	bannerStatus = regexp.MustCompile(`^⚠\s+[A-Z][A-Z_]+ \(code \d{3}\)`)
+
 	// retryAfterPattern finds a delay after a word such as retry, reset, delay
 	// or after: `retry in 12.5s`, `retryDelay: "30s"`, `quotaResetDelay`,
 	// `resets in 1h2m3s`, `after 40` (a bare count is seconds).
@@ -112,7 +117,8 @@ var (
 func classifyBanner(chunk string) *failure {
 	text := strings.TrimSpace(chunk)
 
-	if !slices.ContainsFunc(bannerPrefixes, func(prefix string) bool { return strings.HasPrefix(text, prefix) }) {
+	if !slices.ContainsFunc(bannerPrefixes, func(prefix string) bool { return strings.HasPrefix(text, prefix) }) &&
+		!bannerStatus.MatchString(text) {
 		return nil
 	}
 
