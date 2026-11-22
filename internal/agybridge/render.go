@@ -61,15 +61,22 @@ func maxTokens(req *messagesRequest) int {
 	return int(n)
 }
 
-// agy's thinking levels; a model id agy takes is "<base>-<level>".
+// agy's thinking levels; a model id agy takes is "<base>-<level>". Only the
+// Gemini 4 models that publish an Extra High variant take levelXHigh.
 const (
 	levelLow    = "low"
 	levelMedium = "medium"
 	levelHigh   = "high"
+	levelXHigh  = "xhigh"
 )
+
+// levelOrder ranks the levels, lightest first.
+var levelOrder = []string{levelLow, levelMedium, levelHigh, levelXHigh}
 
 // requestLevel picks agy's thinking level: an effort wins over a thinking
 // budget, and agy's own default, medium, covers adaptive or absent thinking.
+// The level is the one asked for; a model that lacks it runs at its nearest
+// lighter one (baseModel.agyID).
 func requestLevel(req *messagesRequest) string {
 	var config struct {
 		Effort string `json:"effort"`
@@ -81,8 +88,10 @@ func requestLevel(req *messagesRequest) string {
 			return levelLow
 		case "medium":
 			return levelMedium
-		case "high", "xhigh", "max":
+		case "high":
 			return levelHigh
+		case "xhigh", "max":
+			return levelXHigh
 		}
 	}
 
