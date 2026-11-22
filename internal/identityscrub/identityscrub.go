@@ -68,6 +68,14 @@ var antigravityRules = []Rule{
 		Pattern: `Hermes Agent, an intelligent AI assistant created by Nous Research`,
 		Replace: "an AI assistant",
 	},
+	{
+		// The last sentence of Claude Code's standard security paragraph.
+		Pattern: `[ \t]*Dual-use security tools \([^)\n]*\) require clear authorization context[^.\n]*\.`,
+	},
+	{
+		// The harness bullet about pasted content in Claude Code's system prompt.
+		Pattern: `^[ \t]*-[ \t]*Text inside <pasted_content> tags[^\n]*\n?`,
+	},
 }
 
 var profiles = map[string]*Scrubber{
