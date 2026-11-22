@@ -703,6 +703,16 @@ func (f *fakeAgy) prompt(id json.RawMessage, prompt string) {
 		f.chunk("Hello")
 		f.chunk(", world")
 		f.end(id, "end_turn", 11, 7)
+	case "deniedempty":
+		f.bridge.request("session/request_permission", map[string]any{
+			"sessionId": "fake-session",
+			"toolCall": map[string]any{
+				"toolCallId": "call-1",
+				"title":      "read_url_content https://feeds.example.test/rss?token=s3cret",
+				"kind":       "fetch",
+			},
+		})
+		f.end(id, "end_turn", 5, 0)
 	case "model":
 		f.chunk(f.model)
 		f.end(id, "end_turn", 1, 1)

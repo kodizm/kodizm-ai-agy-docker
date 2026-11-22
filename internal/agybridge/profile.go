@@ -24,6 +24,9 @@ const (
 	// agyTokenPath is where agy 1.5.2 reads its login, below HOME.
 	agyTokenPath = ".gemini/antigravity-cli/antigravity-oauth-token"
 
+	// agySettingsPath is agy's settings file, below HOME. agy loads it in acp mode too.
+	agySettingsPath = ".gemini/antigravity-cli/settings.json"
+
 	installationIDFile = "installation_id"
 )
 
@@ -38,13 +41,16 @@ func cleanArgs() []string {
 
 // writeCleanAgent writes the custom agent file agy discovers in the session's
 // workspace. Only the client's MCP tools and, when web is set, agy's web
-// search and fetch are enabled; the built-in file, shell, browser and
-// subagent tools are not.
+// search are enabled; the built-in file, shell, browser and subagent tools
+// are not, and neither is agy's URL fetch. agy 1.5.2 never offered the fetch
+// although it was listed; a later agy may, it asks permission for a fetch, the
+// bridge answers every permission request cancelled and the turn ends empty.
+// No URL is fetched from the bridge host.
 //
 // Every client tool must be listed by name with eager set: a "*" wildcard does
 // not register them. The names come from the client, so they are emitted as a
 // JSON flow sequence, which is valid YAML whatever characters they carry. The
-// web tool names are fixed because a misspelt name in tools can hang agy.
+// web tool name is fixed because a misspelt name in tools can hang agy.
 func writeCleanAgent(workspace string, toolNames []string, web bool) error {
 	dir := filepath.Join(workspace, ".agents", "agents")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -53,7 +59,7 @@ func writeCleanAgent(workspace string, toolNames []string, web bool) error {
 
 	tools := "[]"
 	if web {
-		tools = "[search_web, read_url_content]"
+		tools = "[search_web]"
 	}
 
 	var agent strings.Builder
@@ -217,6 +223,10 @@ func (h *spawnHomes) prepare(acct Account) (string, error) {
 		err = writeLogin(home, acct, installation)
 	}
 
+	if err == nil {
+		err = writeSettings(home)
+	}
+
 	if err != nil {
 		return "", errors.Join(err, h.remove(home))
 	}
@@ -310,6 +320,35 @@ func writeLogin(home string, acct Account, installation []byte) error {
 
 	if err := writeNew(filepath.Join(dir, installationIDFile), installation); err != nil {
 		return fmt.Errorf("agy installation id: %w", err)
+	}
+
+	return nil
+}
+
+// settingsFile is agy's settings.json as far as the bridge sets it.
+type settingsFile struct {
+	Permissions struct {
+		Allow []string `json:"allow"`
+	} `json:"permissions"`
+}
+
+// writeSettings allows agy to call the tools of the client's MCP server
+// without asking. agy 1.5.8 applies its permission rules to eager MCP tools
+// too, and an ask is answered cancelled by the bridge, so without this rule
+// a client tool call would end the turn empty. Nothing else is allowed: agy's
+// own tools keep asking, and the bridge keeps denying.
+func writeSettings(home string) error {
+	var settings settingsFile
+
+	settings.Permissions.Allow = []string{"mcp(" + mcpServerName + "/*)"}
+
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+
+	if err := writeNew(filepath.Join(home, agySettingsPath), raw); err != nil {
+		return fmt.Errorf("agy settings file: %w", err)
 	}
 
 	return nil

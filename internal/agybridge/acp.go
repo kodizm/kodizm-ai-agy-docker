@@ -197,7 +197,7 @@ type agent struct {
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 	onChunk  func(text string)
-	onDenied func(method string)
+	onDenied func(method, kind, tool string)
 	// onToolCall runs for every tool call agy starts itself (its own web
 	// search among them) or hands to the client.
 	onToolCall func()
@@ -254,6 +254,14 @@ func (e *rpcError) Error() string {
 
 // errAgyStart marks a failure to launch agy at all.
 var errAgyStart = errors.New("start agy")
+
+// errPermissionDenied marks a turn that agy ended with no text after the
+// bridge answered one of its permission requests cancelled: the tool call it
+// wanted never ran, so the empty end_turn is a failure, not an answer.
+var errPermissionDenied = errors.New("agy ended the turn empty after a cancelled permission request")
+
+// reasonPermissionDenied is the request log's reason for that failure.
+const reasonPermissionDenied = "permission_denied"
 
 // agentEnv is the environment agy runs with: the bridge's own without the
 // bridge API key, which agy and the model behind it have no use for, with
@@ -321,7 +329,8 @@ func startAgent(
 	extraArgs []string,
 	home string,
 	stderr io.Writer,
-	onChunk, onDenied func(string),
+	onChunk func(string),
+	onDenied func(method, kind, tool string),
 	onToolCall func(),
 ) (*agent, error) {
 	args := append(append([]string{"acp"}, extraArgs...), "--disable-telemetry")
@@ -530,7 +539,52 @@ func (a *agent) deny(m rpcMessage) {
 	}
 
 	a.touch()
-	a.onDenied(m.Method)
+
+	kind, tool := "-", "-"
+	if m.Method == "session/request_permission" {
+		kind, tool = permissionLabel(m.Params)
+	}
+
+	a.onDenied(m.Method, kind, tool)
+}
+
+// permissionKind is the ACP tool kind agy names in a permission request: a
+// plain lowercase word such as fetch or execute.
+var permissionKind = regexp.MustCompile(`^[a-z_]{1,24}$`)
+
+// permissionTool is a tool name: the first word of a request's title must be
+// one whole, short word of these characters to be logged.
+var permissionTool = regexp.MustCompile(`^[A-Za-z0-9_-]{1,24}$`)
+
+// permissionLabel names what agy asked permission for so a denied tool shows
+// in the log. It keeps the tool kind and the first word of the title only:
+// the rest of a title or the request's input can carry a URL, a path or a
+// secret, so it is never read, and a first word that is long or carries a dot
+// (a host name, a token) is not a tool name. A part that is not a plain word
+// is "-".
+func permissionLabel(params json.RawMessage) (kind, tool string) {
+	var request struct {
+		ToolCall struct {
+			Kind  string `json:"kind"`
+			Title string `json:"title"`
+		} `json:"toolCall"`
+	}
+
+	kind, tool = "-", "-"
+
+	if json.Unmarshal(params, &request) != nil {
+		return kind, tool
+	}
+
+	if permissionKind.MatchString(request.ToolCall.Kind) {
+		kind = request.ToolCall.Kind
+	}
+
+	if words := strings.Fields(request.ToolCall.Title); len(words) > 0 && permissionTool.MatchString(words[0]) {
+		tool = words[0]
+	}
+
+	return kind, tool
 }
 
 // touch notes a sign of life.

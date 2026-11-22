@@ -983,14 +983,14 @@ func TestCleanAgentFileExistsWhenAgySessionOpens(t *testing.T) {
 			name:  "tools and web",
 			tools: tools,
 			want: []string{
-				"tools: [search_web, read_url_content]\n",
+				"tools: [search_web]\n",
 				`mcpServers: [{"name":"client","tools":{"odd \"name\": x":{"eager":true},` +
 					`"read_file":{"eager":true},"write_file":{"eager":true}}}]` + "\n",
 			},
 		},
 		{
 			name:  "no tools",
-			want:  []string{"tools: [search_web, read_url_content]\n"},
+			want:  []string{"tools: [search_web]\n"},
 			deny:  []string{"mcpServers"},
 			tools: nil,
 		},
@@ -1037,10 +1037,11 @@ func TestAgyStateIsRemovedWhenTheSessionEnds(t *testing.T) {
 			b := newBridge(t, map[string]string{"AGY_BRIDGE_CLEAN": clean})
 
 			// 1. While the session runs, agy has persisted its files beside the
-			// login it was given.
+			// login and the settings file it was given.
 			var during []string
-			if err := json.Unmarshal([]byte(b.ask(t, "state", readFileTool)), &during); err != nil || len(during) != 9 ||
-				!slices.Contains(during, "antigravity-oauth-token") || !slices.Contains(during, "installation_id") {
+			if err := json.Unmarshal([]byte(b.ask(t, "state", readFileTool)), &during); err != nil || len(during) != 10 ||
+				!slices.Contains(during, "antigravity-oauth-token") || !slices.Contains(during, "installation_id") ||
+				!slices.Contains(during, "settings.json") {
 				t.Fatalf("state during the session: %v, %v", during, err)
 			}
 

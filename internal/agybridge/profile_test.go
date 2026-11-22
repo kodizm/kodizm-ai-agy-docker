@@ -36,7 +36,7 @@ func TestWriteCleanAgentShape(t *testing.T) {
 		"excludeDefaultComponents: true\n" +
 		"mainAgent: true\n" +
 		"subagent: false\n" +
-		"tools: [search_web, read_url_content]\n" +
+		"tools: [search_web]\n" +
 		`mcpServers: [{"name":"client","tools":{"Bash":{"eager":true},"mcp__x__y":{"eager":true},` +
 		`"read_file":{"eager":true}}}]` + "\n" +
 		"---\n" +
@@ -495,5 +495,30 @@ func TestSpawnHomeRemovalIsGuarded(t *testing.T) {
 
 	if err := homes.remove(home); err == nil {
 		t.Fatal("a missing home counted as removed")
+	}
+}
+
+func TestSpawnHomeAllowsTheClientMCPServer(t *testing.T) {
+	homes := newTestHomes(t)
+
+	home, err := homes.prepare(Account{ID: "acct-1", AccessToken: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(home, agySettingsPath)
+
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("settings file: %v, %v", info, err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := `{"permissions":{"allow":["mcp(client/*)"]}}`; string(raw) != want {
+		t.Fatalf("settings %s, want %s", raw, want)
 	}
 }
