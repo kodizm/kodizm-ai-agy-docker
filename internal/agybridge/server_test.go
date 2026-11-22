@@ -498,6 +498,24 @@ func TestModelSelection(t *testing.T) {
 			want:      "claude-opus-5-5-high",
 		},
 		{
+			name:      "extra high reaches a model that has it",
+			requested: "gemini-4-neon",
+			fields:    map[string]any{"output_config": map[string]any{"effort": "xhigh"}},
+			want:      "gemini-4-neon-xhigh",
+		},
+		{
+			name:      "max is the highest level a model has",
+			requested: "gemini-4-hydrogen",
+			fields:    map[string]any{"output_config": map[string]any{"effort": "max"}},
+			want:      "gemini-4-hydrogen-xhigh",
+		},
+		{
+			name:      "extra high on a model without it stays at high",
+			requested: "gemini-4-argon",
+			fields:    map[string]any{"output_config": map[string]any{"effort": "xhigh"}},
+			want:      "gemini-4-argon-high",
+		},
+		{
 			name:      "a thinking budget picks the level",
 			requested: "claude-sonnet-5-5",
 			fields:    map[string]any{"thinking": map[string]any{"type": "enabled", "budget_tokens": 1024}},
@@ -649,8 +667,8 @@ func TestRequestLevel(t *testing.T) {
 		{name: "effort low", body: `{"output_config": {"effort": "low"}}`, want: "low"},
 		{name: "effort medium", body: `{"output_config": {"effort": "medium"}}`, want: "medium"},
 		{name: "effort high", body: `{"output_config": {"effort": "high"}}`, want: "high"},
-		{name: "effort xhigh", body: `{"output_config": {"effort": "xhigh"}}`, want: "high"},
-		{name: "effort max", body: `{"output_config": {"effort": "max"}}`, want: "high"},
+		{name: "effort xhigh", body: `{"output_config": {"effort": "xhigh"}}`, want: "xhigh"},
+		{name: "effort max", body: `{"output_config": {"effort": "max"}}`, want: "xhigh"},
 		{
 			name: "unknown effort falls to thinking",
 			body: `{"output_config": {"effort": "huge"}, "thinking": {"type": "disabled"}}`,
@@ -699,6 +717,7 @@ func TestLoadConfigRefusesIdsThatNameALevel(t *testing.T) {
 	for _, vars := range []map[string]string{
 		{"AGY_BRIDGE_MODELS": "gemini-3.8-flash-low"},
 		{"AGY_BRIDGE_MODELS": "gemini-4-argon, claude-opus-5-5-high"},
+		{"AGY_BRIDGE_MODELS": "gemini-4-neon-xhigh"},
 		{"AGY_BRIDGE_DEFAULT_MODEL": "gemini-3.8-flash-medium"},
 	} {
 		if _, err := LoadConfig(func(k string) string { return vars[k] }); err == nil || !strings.Contains(err.Error(), "names a level") {
@@ -794,6 +813,14 @@ func TestAgyID(t *testing.T) {
 		{model: "gpt-oss-120b", level: "low", want: "gpt-oss-120b-medium", wantLevel: "medium"},
 		{model: "gpt-oss-120b", level: "high", want: "gpt-oss-120b-medium", wantLevel: "medium"},
 		{model: "not-in-catalogue", level: "high", want: "not-in-catalogue-high", wantLevel: "high"},
+		{model: "gemini-4-neon", level: "xhigh", want: "gemini-4-neon-xhigh", wantLevel: "xhigh"},
+		{model: "gemini-4-hydrogen", level: "xhigh", want: "gemini-4-hydrogen-xhigh", wantLevel: "xhigh"},
+		{model: "gemini-4-neon", level: "low", want: "gemini-4-neon-low", wantLevel: "low"},
+		// A model without the fourth level takes its nearest lighter one, not its lightest.
+		{model: "gemini-4-argon", level: "xhigh", want: "gemini-4-argon-high", wantLevel: "high"},
+		{model: "claude-opus-5-5", level: "xhigh", want: "claude-opus-5-5-high", wantLevel: "high"},
+		{model: "gpt-oss-120b", level: "xhigh", want: "gpt-oss-120b-medium", wantLevel: "medium"},
+		{model: "not-in-catalogue", level: "xhigh", want: "not-in-catalogue-high", wantLevel: "high"},
 	}
 
 	for _, tt := range tests {
@@ -1608,6 +1635,8 @@ func TestCountTokensModelsAndProbes(t *testing.T) {
 		{Type: "model", ID: "claude-sonnet-5-5", DisplayName: "Claude Sonnet 5.5"},
 		{Type: "model", ID: "gemini-3.8-flash", DisplayName: "Gemini 3.8 Flash"},
 		{Type: "model", ID: "gemini-4-argon", DisplayName: "Gemini 4 Argon"},
+		{Type: "model", ID: "gemini-4-hydrogen", DisplayName: "Gemini 4 Hydrogen"},
+		{Type: "model", ID: "gemini-4-neon", DisplayName: "Gemini 4 Neon"},
 		{Type: "model", ID: "gpt-oss-120b", DisplayName: "GPT-OSS 120B"},
 	}
 

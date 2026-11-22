@@ -148,6 +148,8 @@ func TestQuotaGroups(t *testing.T) {
 	tests := map[string][]string{
 		"gemini-3.8-flash":  {"gemini"},
 		"gemini-4-argon":    {"gemini", "argon"},
+		"gemini-4-neon":     {"gemini"},
+		"gemini-4-hydrogen": {"gemini"},
 		"claude-opus-5-5":   {"thirdparty"},
 		"claude-sonnet-5-5": {"thirdparty"},
 		"gpt-oss-120b":      {"thirdparty"},

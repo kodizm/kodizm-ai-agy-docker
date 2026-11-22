@@ -40,19 +40,28 @@ type baseModel struct {
 	levels      []string
 }
 
-var allLevels = []string{levelLow, levelMedium, levelHigh}
+var (
+	standardLevels = []string{levelLow, levelMedium, levelHigh}
+	extraLevels    = []string{levelLow, levelMedium, levelHigh, levelXHigh}
+)
 
-// catalogue is what agy 1.5.2 offers in session/new.
+// catalogue is what the bridge advertises by default, with the thinking
+// levels agy takes for each (read from agy 1.5.14: Gemini 4 Neon and Hydrogen
+// add Extra High, `xhigh`). Gemini 4 Carbon is left out on purpose: Google
+// serves it to Ultra and Enterprise only, so an advertised Carbon would fail on
+// a Pro pool. An Ultra pool lists it in AGY_BRIDGE_MODELS.
 var catalogue = []baseModel{
-	{id: "gemini-4-argon", displayName: "Gemini 4 Argon", levels: allLevels},
-	{id: "gemini-3.8-flash", displayName: "Gemini 3.8 Flash", levels: allLevels},
-	{id: "claude-opus-5-5", displayName: "Claude Opus 5.5", levels: allLevels},
-	{id: "claude-sonnet-5-5", displayName: "Claude Sonnet 5.5", levels: allLevels},
+	{id: "gemini-4-argon", displayName: "Gemini 4 Argon", levels: standardLevels},
+	{id: "gemini-4-neon", displayName: "Gemini 4 Neon", levels: extraLevels},
+	{id: "gemini-4-hydrogen", displayName: "Gemini 4 Hydrogen", levels: extraLevels},
+	{id: "gemini-3.8-flash", displayName: "Gemini 3.8 Flash", levels: standardLevels},
+	{id: "claude-opus-5-5", displayName: "Claude Opus 5.5", levels: standardLevels},
+	{id: "claude-sonnet-5-5", displayName: "Claude Sonnet 5.5", levels: standardLevels},
 	{id: "gpt-oss-120b", displayName: "GPT-OSS 120B", levels: []string{levelMedium}},
 }
 
 // lookupModel finds a base model in the catalogue; a configured id agy may
-// know beyond it is named by its id and taken at every level.
+// know beyond it is named by its id and taken at the three standard levels.
 func lookupModel(id string) baseModel {
 	for _, model := range catalogue {
 		if model.id == id {
@@ -60,18 +69,33 @@ func lookupModel(id string) baseModel {
 		}
 	}
 
-	return baseModel{id: id, displayName: id, levels: allLevels}
+	return baseModel{id: id, displayName: id, levels: standardLevels}
 }
 
 // agyID returns the model id agy takes for the level and the level it runs
-// at: a level the model lacks falls to its first, for a single-level model
-// its only one.
+// at. A level the model lacks falls to its nearest lighter one (Extra High on
+// a model that tops out at high runs at high), and to its first when nothing
+// lighter exists, so a single-level model always runs at its only one.
 func (m baseModel) agyID(level string) (id, effective string) {
-	if !slices.Contains(m.levels, level) {
-		level = m.levels[0]
-	}
+	level = m.nearestLevel(level)
 
 	return m.id + "-" + level, level
+}
+
+// nearestLevel keeps a level the model has and otherwise walks down levelOrder
+// to the first one it has.
+func (m baseModel) nearestLevel(level string) string {
+	if slices.Contains(m.levels, level) {
+		return level
+	}
+
+	for rank := slices.Index(levelOrder, level) - 1; rank >= 0; rank-- {
+		if slices.Contains(m.levels, levelOrder[rank]) {
+			return levelOrder[rank]
+		}
+	}
+
+	return m.levels[0]
 }
 
 // Config is the bridge's runtime configuration.
@@ -129,7 +153,7 @@ type Config struct {
 // bridge appends the level itself, so it would reach agy as
 // gemini-3.8-flash-low-medium and every request would fail.
 func checkBaseModel(key, id string) error {
-	for _, level := range []string{levelLow, levelMedium, levelHigh} {
+	for _, level := range levelOrder {
 		if strings.HasSuffix(id, "-"+level) {
 			return fmt.Errorf("%s: %q names a level; list the base model and let the request choose it", key, id)
 		}
